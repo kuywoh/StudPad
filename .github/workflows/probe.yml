@@ -1,0 +1,38 @@
+name: probe
+
+# Builds the tiny nested-signing probe IPA. No Roblox binary is fetched here.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.3
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.3.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.3.app
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build probe
+        run: |
+          set -euo pipefail
+          chmod +x probe/build.sh
+          probe/build.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudPadProbe
+          path: probe/StudPadProbe.ipa
+          if-no-files-found: error
+          retention-days: 30

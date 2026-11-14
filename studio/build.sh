@@ -88,7 +88,7 @@ patch_one() {
 
 echo "=== patching guest and Qt ==="
 patch_one "$APP_OUT/Frameworks/StudioKit.framework/StudioKit" main
-for fw in "$APP_OUT/Frameworks/"*.framework; do
+for fw in "$APP_OUT/Frameworks/Qt"*.framework; do
   name="$(basename "$fw" .framework)"
   patch_one "$fw/Versions/5/$name"
 done

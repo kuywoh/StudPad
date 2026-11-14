@@ -6,7 +6,8 @@ Private research repo for running the official **macOS arm64 Roblox Studio** bui
 load commands are rewritten to reach shim libraries, and the shims stand in for the macOS
 frameworks Studio imports.
 
-**Status: Phase 0 (recon).** There is no device build yet, and this README does not claim one works.
+**Status: Phase 0 (recon) complete.** See [docs/phase0.md](docs/phase0.md). There is no device build
+yet, and this README does not claim one works.
 
 ## Hard rules
 
@@ -26,7 +27,7 @@ frameworks Studio imports.
 | `recon/fetch_studio.sh` | Resolves the live Mac Studio build and downloads the official package (runner only) |
 | `recon/studio_recon.py` | Mach-O inventory, system-library imports, iOS SDK gap buckets, static protection indicators |
 | `.github/workflows/recon-studio.yml` | One-off macOS job; the artifact is text only |
-| `docs/phase0.md` | Phase 0 findings (written after the first recon run) |
+| `docs/phase0.md` | Phase 0 findings, gap ranking, and feasibility verdict |
 
 ## Running recon
 

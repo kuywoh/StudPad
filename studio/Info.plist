@@ -16,6 +16,10 @@
 	<string>StudPad Studio Probe</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1</string>
 	<key>CFBundleVersion</key>

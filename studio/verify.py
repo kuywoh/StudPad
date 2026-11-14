@@ -161,10 +161,18 @@ def main():
     plist = plistlib.loads(z.read("Payload/StudPadStudioProbe.app/Info.plist"))
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off")
+    host_name = plist.get("CFBundleExecutable")
+    if host_name != "StudPadStudioProbe":
+        fail(f"CFBundleExecutable is {host_name!r}, expected StudPadStudioProbe")
+    info = z.getinfo(HOST)
+    mode = (info.external_attr >> 16) & 0o777
+    if not mode & 0o111:
+        fail(f"host executable mode is {mode:o}, expected an executable bit")
 
     print(
         f"verify: guest MH_BUNDLE iOS, LC_MAIN, weak binds {weak}/{total}, "
-        f"signature blob present={has_sig}; host MH_EXECUTE iOS; QtCore dylib iOS; "
+        f"signature blob present={has_sig}; host MH_EXECUTE iOS mode={mode:o}; "
+        f"CFBundleExecutable={host_name}; QtCore dylib iOS; "
         f"IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )
 

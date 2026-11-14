@@ -113,7 +113,9 @@ file "$APP_OUT/StudPadStudioProbe" "$APP_OUT/Frameworks/StudioKit.framework/Stud
 du -sh "$APP_OUT"
 
 echo "=== packaging ==="
+chmod 755 "$APP_OUT/StudPadStudioProbe"
 (cd "$OUT" && zip -qry "$WORK/StudPadStudioProbe.ipa" Payload)
 python3 verify.py "$WORK/StudPadStudioProbe.ipa"
-ls -lh "$WORK/StudPadStudioProbe.ipa"
+ls -l "$WORK/StudPadStudioProbe.ipa"
+shasum -a 256 "$WORK/StudPadStudioProbe.ipa"
 echo "built $WORK/StudPadStudioProbe.ipa"

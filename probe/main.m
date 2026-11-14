@@ -122,8 +122,8 @@ static void check_library_validation(const char *path) {
         .lv_error_message_size = sizeof msg,
         .lv_error_message = msg,
     };
-    int r = fcntl(fd, F_CHECK_LV, &lv);
-    say(@"  lv: F_CHECK_LV = %d%s%s%s%s", r, r ? ", " : "", r ? strerror(errno) : "",
+    int check_r = fcntl(fd, F_CHECK_LV, &lv);
+    say(@"  lv: F_CHECK_LV = %d%s%s%s%s", check_r, check_r ? ", " : "", check_r ? strerror(errno) : "",
         msg[0] ? ": " : "", msg);
 #else
     say(@"  lv: F_CHECK_LV is not in this SDK");

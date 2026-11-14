@@ -1,0 +1,90 @@
+name: recon-studio
+
+# Phase 0: download the official Mac Studio build on a GitHub-hosted macOS runner,
+# inspect it, and upload text reports only. No Roblox binary leaves the runner.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Studio version hash (version-...); blank resolves the live build"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recon-studio
+  cancel-in-progress: false
+
+jobs:
+  recon:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record runner toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p recon-out
+          {
+            echo "# Runner"
+            echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner: $RUNNER_OS / $RUNNER_ARCH"
+            echo "uname: $(uname -a)"
+            sw_vers
+            echo
+            xcodebuild -version || true
+            echo
+            xcodebuild -showsdks || true
+            echo
+            echo "Xcode bundles:"
+            ls /Applications | grep -i '^Xcode' || true
+            echo
+            python3 --version
+            python3 -c 'import yaml; print("PyYAML", yaml.__version__)' 2>/dev/null || true
+          } > recon-out/env.txt
+
+      - name: Install Python deps
+        run: |
+          set -euo pipefail
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m pip install --quiet --disable-pip-version-check --user \
+              --break-system-packages pyyaml 2>/dev/null \
+              || python3 -m pip install --quiet --disable-pip-version-check --user pyyaml
+          fi
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+
+      - name: Fetch official Studio package
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x recon/fetch_studio.sh
+          recon/fetch_studio.sh "$VERSION_INPUT" .work
+
+      - name: Analyze bundle
+        run: |
+          set -euo pipefail
+          python3 recon/studio_recon.py --work .work --out recon-out
+
+      - name: Refuse binary artifacts
+        run: |
+          set -euo pipefail
+          bad="$(find recon-out -type f \
+            ! -name '*.md' ! -name '*.tsv' ! -name '*.txt' ! -name '*.json' -print -quit)"
+          if [ -n "$bad" ]; then
+            echo "ERROR: non-text file in the artifact: $bad"
+            exit 1
+          fi
+          du -sh recon-out
+          ls -l recon-out
+
+      - name: Upload text report
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-recon-${{ github.run_number }}
+          path: recon-out
+          if-no-files-found: error
+          retention-days: 30

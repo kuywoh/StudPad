@@ -1,0 +1,14 @@
+# Never commit downloaded client binaries or extracted bundles.
+.work/
+work/
+build/
+recon-out/
+*.dmg
+*.zip
+*.ipa
+Payload/
+*.app/
+*.appex/
+__pycache__/
+*.pyc
+.DS_Store

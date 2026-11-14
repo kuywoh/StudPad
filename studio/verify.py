@@ -16,9 +16,9 @@ LC_MAIN = 0x80000028
 LC_BUILD_VERSION = 0x32
 LC_CODE_SIGNATURE = 0x1D
 
-GUEST = "Payload/StudPadStudioProbe.app/Frameworks/StudioKit.framework/StudioKit"
+GUEST = "Payload/StudPadStudioProbe.app/Frameworks/StudioKit"
 HOST = "Payload/StudPadStudioProbe.app/StudPadStudioProbe"
-QTCORE = "Payload/StudPadStudioProbe.app/Frameworks/QtCore.framework/QtCore"
+QTCORE = "Payload/StudPadStudioProbe.app/Frameworks/libQtCore.dylib"
 
 
 def fail(msg):
@@ -92,8 +92,7 @@ def main():
         HOST,
         "Payload/StudPadStudioProbe.app/Info.plist",
         GUEST,
-        "Payload/StudPadStudioProbe.app/Frameworks/StudioKit.framework/Info.plist",
-        "Payload/StudPadStudioProbe.app/Frameworks/QtCore.framework/Info.plist",
+        "Payload/StudPadStudioProbe.app/Frameworks/libQtCore.dylib",
         "Payload/StudPadStudioProbe.app/Frameworks/PlugIns/platforms/libqoffscreen.dylib",
         "Payload/StudPadStudioProbe.app/libfbxsdk.dylib",
         "Payload/StudPadStudioProbe.app/qt.conf",
@@ -124,6 +123,8 @@ def main():
                 weak_libs.append(path)
             if "Foundation.framework" in path or "WebKit.framework" in path:
                 mapped.append(path)
+            if "Qt" in path and ".framework" in path:
+                fail(f"guest still references a Qt framework bundle: {path}")
         elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
             fields = struct.unpack_from("<10I", data, off + 8)
             for bo, bs in ((fields[2], fields[3]), (fields[6], fields[7])):

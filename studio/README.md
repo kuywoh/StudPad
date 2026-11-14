@@ -12,8 +12,10 @@ The build:
    Cocoa, and libcups as weak libraries;
 5. marks every dyld-info import weak, so a symbol iOS lacks binds to `NULL` instead of failing the load;
 6. sets `LC_BUILD_VERSION` to iOS with `vtool`;
-7. forces Qt's **offscreen** platform and **Fusion** style, avoiding Cocoa/AppKit for this first probe;
-8. loads the guest with `dlopen(RTLD_NOW|RTLD_GLOBAL)`, finds its `LC_MAIN`, and calls the entry.
+7. ships Qt as plain `libQt*.dylib` files and the guest as `Frameworks/StudioKit`, with no nested
+   `.framework` bundle for SideStore's installer to validate;
+8. forces Qt's **offscreen** platform and **Fusion** style, avoiding Cocoa/AppKit for this first probe;
+9. loads the guest with `dlopen(RTLD_NOW|RTLD_GLOBAL)`, finds its `LC_MAIN`, and calls the entry.
 
 The host is a normal UIKit app, so the 20-second scene watchdog is satisfied. `stderr` and `stdout` are
 redirected to `Documents/studio.log` before the load, and signals write a backtrace there.

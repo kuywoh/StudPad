@@ -36,14 +36,14 @@ LC_DYLD_INFO_ONLY = 0x80000022
 
 DYLIB_COMMANDS = {LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB}
 
-# Qt frameworks keep their binary under Versions/5, but SideStore's nested signer resolves
-# CFBundleExecutable at the framework root. The build flattens the layout; these references must follow.
-QT_VERSIONED = re.compile(r"^@rpath/(Qt[A-Za-z0-9]+)\.framework/Versions/[^/]+/(.+)$")
+# The build installs Qt as plain dylibs, not framework bundles, so SideStore's nested-framework
+# executable check never sees them. Every Qt framework reference must become @rpath/libQtX.dylib.
+QT_FRAMEWORK = re.compile(r"^@rpath/(Qt[A-Za-z0-9]+)\.framework(?:/.*)?$")
 
 
 def flatten_qt(path: str) -> str:
-    m = QT_VERSIONED.match(path)
-    return f"@rpath/{m.group(1)}.framework/{m.group(2)}" if m else path
+    m = QT_FRAMEWORK.match(path)
+    return f"@rpath/lib{m.group(1)}.dylib" if m else path
 
 # macOS frameworks with no iOS equivalent. Their load commands become weak, and their symbols
 # are weak imports, so dyld can finish the load and a call can be diagnosed at runtime.

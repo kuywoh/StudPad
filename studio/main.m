@@ -135,7 +135,7 @@ static const struct mach_header_64 *find_guest(uint32_t first) {
 
 - (void)runStudio {
     NSString *bundlePath = NSBundle.mainBundle.bundlePath;
-    NSString *guest = [bundlePath stringByAppendingPathComponent:@"Frameworks/StudioKit.framework/StudioKit"];
+    NSString *guest = [bundlePath stringByAppendingPathComponent:@"Frameworks/StudioKit"];
     NSString *plugins = [bundlePath stringByAppendingPathComponent:@"Frameworks/PlugIns"];
     NSString *platforms = [plugins stringByAppendingPathComponent:@"platforms"];
 

@@ -11,7 +11,7 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 
 echo "=== fetching official arm64 Studio ==="
-"$ROOT/recon/fetch_studio.sh" "" "$WORK/fetch"
+bash "$ROOT/recon/fetch_studio.sh" "" "$WORK/fetch"
 APP="$(find "$WORK/fetch/app" -maxdepth 2 -name 'RobloxStudio.app' -type d -print -quit)"
 [ -n "$APP" ] || { echo "no RobloxStudio.app in $WORK/fetch/app" >&2; exit 1; }
 echo "Studio app: $APP"

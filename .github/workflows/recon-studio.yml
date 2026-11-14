@@ -9,6 +9,11 @@ on:
         description: "Studio version hash (version-...); blank resolves the live build"
         required: false
         type: string
+      package_path:
+        description: "CDN path prefix: mac/arm64 for Apple Silicon, mac for Intel"
+        required: false
+        default: "mac/arm64"
+        type: string
 
 permissions:
   contents: read
@@ -59,6 +64,7 @@ jobs:
       - name: Fetch official Studio package
         env:
           VERSION_INPUT: ${{ inputs.version }}
+          STUDIO_PATH_PREFIX: ${{ inputs.package_path || 'mac/arm64' }}
         run: |
           set -euo pipefail
           chmod +x recon/fetch_studio.sh

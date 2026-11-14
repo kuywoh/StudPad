@@ -33,10 +33,12 @@ frameworks Studio imports.
 Actions → **recon-studio** → *Run workflow*. A run takes roughly 8–12 minutes on a standard
 macOS runner (about 80–120 billed minutes at the 10× macOS multiplier). The artifact contains
 `report.md`, `macho.tsv`, `deps.tsv`, `imports.tsv`, `gap_by_library.tsv`, `gap_missing.tsv`,
-`gap_different.tsv`, `protection.txt`, `frameworks.txt`, and `env.txt`.
+`gap_different.tsv`, `protection.txt`, `frameworks.txt`, `gap_summary.json`, and `env.txt`.
 
 The download step refuses a package under 100 MB, because the small `RobloxStudio.zip` on the same
-CDN is only the installer; the real app is `version-<hash>-RobloxStudioApp.zip`.
+CDN is only the installer; the real app is `version-<hash>-RobloxStudioApp.zip`. The archive under
+`mac/` is the **Intel** build; Roblox's installer selects `mac/arm64/` on Apple Silicon, so the
+workflow defaults to `mac/arm64/` (input `package_path`).
 
 ## Credits
 

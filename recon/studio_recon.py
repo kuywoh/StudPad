@@ -590,7 +590,7 @@ def main():
     hits = []
     for sym, why in PROTECTION_SYMBOLS.items():
         if sym in symbols_by_name:
-            hits.append(f"{sym}  ({why})  imported by {len(symbols_by_name[sym])} libraries")
+            hits.append((sym, why, len(symbols_by_name[sym])))
     main_exec = os.path.join(app, "Contents", "MacOS", info.get("CFBundleExecutable", "RobloxStudio"))
     string_hits = scan_strings(main_exec) if os.path.exists(main_exec) else {}
     browser_hits = sorted(
@@ -612,8 +612,8 @@ def main():
         else:
             fh.write("  (not found)\n")
         fh.write("\nimports of interest:\n")
-        for line in hits or ["  none"]:
-            fh.write(f"  {line}\n")
+        for sym, why, count in hits or [("none", "", 0)]:
+            fh.write(f"  {sym}  ({why})  imported by {count} libraries\n")
         fh.write("\nstrings in main executable (counts):\n")
         for needle, count in sorted(string_hits.items()):
             fh.write(f"  {needle}: {count}\n")
@@ -659,6 +659,7 @@ def main():
         "",
         f"- Studio version: `{fetch.get('version', 'unknown')}`",
         f"- Upload: `{fetch.get('upload', 'unknown')}`",
+        f"- CDN path: `{fetch.get('prefix', 'unknown')}`",
         f"- Official URL: {fetch.get('url', 'unknown')}",
         f"- Package bytes: {fetch.get('bytes', 'unknown')}",
         f"- SHA-256: `{fetch.get('sha256', 'unknown')}`",
@@ -718,9 +719,8 @@ def main():
         "|---|---|",
     ]
     if hits:
-        for line in hits:
-            parts = line.split("  (", 1)
-            lines.append(f"| `{parts[0]}` | {parts[1].rstrip(')') if len(parts) > 1 else ''} |")
+        for sym, why, count in hits:
+            lines.append(f"| `{sym}` | {why} (imported by {count}) |")
     else:
         lines.append("| none | — |")
     lines += [

@@ -10,7 +10,10 @@ set -euo pipefail
 
 VERSION_INPUT="${1:-}"
 DEST="${2:-.work}"
-MAC="https://setup.rbxcdn.com/mac"
+# The Apple Silicon app lives under an arch-specific prefix; the unqualified "mac" path
+# serves the x86_64 build. Roblox's own installer chooses between them by arch.
+PREFIX="${STUDIO_PATH_PREFIX:-mac/arm64}"
+CDN="https://setup.rbxcdn.com"
 MIN_BYTES=$((100 * 1024 * 1024))
 
 mkdir -p "$DEST"
@@ -32,7 +35,7 @@ case "$UPLOAD" in
   *) UPLOAD="version-$UPLOAD" ;;
 esac
 
-URL="$MAC/$UPLOAD-RobloxStudioApp.zip"
+URL="$CDN/$PREFIX/$UPLOAD-RobloxStudioApp.zip"
 say "Studio version: $VERSION"
 say "Package URL: $URL"
 
@@ -63,6 +66,7 @@ du -sh "$APP"
 {
   echo "version=$VERSION"
   echo "upload=$UPLOAD"
+  echo "prefix=$PREFIX"
   echo "url=$URL"
   echo "bytes=$BYTES"
   echo "sha256=$(shasum -a 256 "$DEST/studio.zip" | awk '{print $1}')"

@@ -37,3 +37,11 @@ jobs:
           path: .work/studio-probe/StudPadStudioProbe.ipa
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload host-only control IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudPadHostOnly
+          path: .work/studio-probe/StudPadHostOnly.ipa
+          if-no-files-found: error
+          retention-days: 1

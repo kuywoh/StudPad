@@ -98,7 +98,7 @@ CC=(xcrun --sdk iphoneos clang -target "$VTARGET" -isysroot "$SDK" -O1 -fobjc-ar
     -Wl,-rpath,@executable_path/Frameworks)
 "${CC[@]}" main.m -o "$APP_OUT/StudPadStudioProbe"
 
-file "$APP_OUT/StudPadStudioProbe" "$APP_OUT/Frameworks/StudioKit.framework/StudioKit"
+file "$APP_OUT/StudPadStudioProbe" "$APP_OUT/Frameworks/StudioKit"
 du -sh "$APP_OUT"
 
 echo "=== packaging ==="
@@ -108,3 +108,20 @@ python3 verify.py "$WORK/StudPadStudioProbe.ipa"
 ls -l "$WORK/StudPadStudioProbe.ipa"
 shasum -a 256 "$WORK/StudPadStudioProbe.ipa"
 echo "built $WORK/StudPadStudioProbe.ipa"
+
+# Tiny control IPA: same plist/host, no Studio payload. If LiveContainer cannot run this,
+# the problem is the host bundle, not the 1 GB guest or zsign. It logs the expected dlopen failure.
+echo "=== packaging host-only control ==="
+HOST_OUT="$WORK/host-only"
+HOST_APP="$HOST_OUT/Payload/StudPadHostOnly.app"
+mkdir -p "$HOST_APP"
+cp Info.plist "$HOST_APP/Info.plist"
+cp "$APP_OUT/StudPadStudioProbe" "$HOST_APP/StudPadHostOnly"
+plutil -replace CFBundleExecutable -string StudPadHostOnly "$HOST_APP/Info.plist"
+plutil -replace CFBundleIdentifier -string com.kuywoh.studpadhostonly "$HOST_APP/Info.plist"
+plutil -replace CFBundleDisplayName -string "StudPad Host Probe" "$HOST_APP/Info.plist"
+plutil -replace CFBundleName -string "StudPad Host Probe" "$HOST_APP/Info.plist"
+chmod 755 "$HOST_APP/StudPadHostOnly"
+(cd "$HOST_OUT" && zip -qry "$WORK/StudPadHostOnly.ipa" Payload)
+ls -l "$WORK/StudPadHostOnly.ipa"
+shasum -a 256 "$WORK/StudPadHostOnly.ipa"

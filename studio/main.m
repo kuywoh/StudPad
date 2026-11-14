@@ -95,7 +95,7 @@ static const struct mach_header_64 *find_guest(uint32_t first) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = first; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "StudioKit.framework/StudioKit")) {
+        if (name && strstr(name, "/Frameworks/StudioKit")) {
             return (const struct mach_header_64 *)_dyld_get_image_header(i);
         }
     }

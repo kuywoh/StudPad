@@ -19,6 +19,7 @@ called will fault, and the host logs the backtrace.
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 
@@ -26,6 +27,7 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
 MH_BUNDLE = 8
 LC_LOAD_DYLIB = 0xC
+LC_ID_DYLIB = 0xD
 LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LOAD_UPWARD_DYLIB = 0x80000023
@@ -33,6 +35,15 @@ LC_DYLD_INFO = 0x22
 LC_DYLD_INFO_ONLY = 0x80000022
 
 DYLIB_COMMANDS = {LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB}
+
+# Qt frameworks keep their binary under Versions/5, but SideStore's nested signer resolves
+# CFBundleExecutable at the framework root. The build flattens the layout; these references must follow.
+QT_VERSIONED = re.compile(r"^@rpath/(Qt[A-Za-z0-9]+)\.framework/Versions/[^/]+/(.+)$")
+
+
+def flatten_qt(path: str) -> str:
+    m = QT_VERSIONED.match(path)
+    return f"@rpath/{m.group(1)}.framework/{m.group(2)}" if m else path
 
 # macOS frameworks with no iOS equivalent. Their load commands become weak, and their symbols
 # are weak imports, so dyld can finish the load and a call can be diagnosed at runtime.
@@ -154,6 +165,22 @@ def patch(path: str, is_main: bool) -> None:
     weak_binds = 0
 
     for off, cmd, cmdsize in list(load_commands(data)):
+        if cmd == LC_ID_DYLIB:
+            name_off = struct.unpack_from("<I", data, off + 8)[0]
+            start = off + name_off
+            nul = data.find(b"\0", start, off + cmdsize)
+            if nul < 0:
+                raise ValueError(f"{path}: unterminated dylib id")
+            old = bytes(data[start:nul]).decode("utf-8", "replace")
+            new = flatten_qt(old)
+            if new != old:
+                encoded = new.encode()
+                capacity = cmdsize - name_off
+                if len(encoded) + 1 > capacity:
+                    raise ValueError(f"{path}: flattened id {new!r} does not fit")
+                data[start:start + capacity] = encoded + b"\0" * (capacity - len(encoded))
+                changed_paths += 1
+            continue
         if cmd in DYLIB_COMMANDS:
             name_off = struct.unpack_from("<I", data, off + 8)[0]
             if name_off >= cmdsize:
@@ -163,7 +190,9 @@ def patch(path: str, is_main: bool) -> None:
             if nul < 0:
                 raise ValueError(f"{path}: unterminated dylib path")
             old = bytes(data[start:nul]).decode("utf-8", "replace")
-            new = ios_path(old)
+            new = flatten_qt(old)
+            if new == old:
+                new = ios_path(old)
             if new is None or framework_name(old) in ABSENT:
                 if cmd != LC_LOAD_WEAK_DYLIB:
                     struct.pack_into("<I", data, off, LC_LOAD_WEAK_DYLIB)

@@ -18,7 +18,7 @@ LC_CODE_SIGNATURE = 0x1D
 
 GUEST = "Payload/StudPadStudioProbe.app/Frameworks/StudioKit.framework/StudioKit"
 HOST = "Payload/StudPadStudioProbe.app/StudPadStudioProbe"
-QTCORE = "Payload/StudPadStudioProbe.app/Frameworks/QtCore.framework/Versions/5/QtCore"
+QTCORE = "Payload/StudPadStudioProbe.app/Frameworks/QtCore.framework/QtCore"
 
 
 def fail(msg):
@@ -93,6 +93,7 @@ def main():
         "Payload/StudPadStudioProbe.app/Info.plist",
         GUEST,
         "Payload/StudPadStudioProbe.app/Frameworks/StudioKit.framework/Info.plist",
+        "Payload/StudPadStudioProbe.app/Frameworks/QtCore.framework/Info.plist",
         "Payload/StudPadStudioProbe.app/Frameworks/PlugIns/platforms/libqoffscreen.dylib",
         "Payload/StudPadStudioProbe.app/libfbxsdk.dylib",
         "Payload/StudPadStudioProbe.app/qt.conf",

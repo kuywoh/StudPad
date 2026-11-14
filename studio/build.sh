@@ -41,9 +41,27 @@ cat > "$APP_OUT/Frameworks/StudioKit.framework/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 
-# Qt frameworks, preserving Versions/5 and resource symlinks.
+# Qt frameworks, flattened: SideStore's nested signer looks for Info.plist and the executable at
+# the framework root, while Qt keeps both under Versions/5.
 for fw in "$APP/Contents/Frameworks/"*.framework; do
-  ditto "$fw" "$APP_OUT/Frameworks/$(basename "$fw")"
+  name="$(basename "$fw" .framework)"
+  dest="$APP_OUT/Frameworks/$name.framework"
+  ditto "$fw" "$dest"
+  mv "$dest/Versions/5/$name" "$dest/$name"
+  rm -rf "$dest/Versions" "$dest/Resources"
+  cat > "$dest/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>$name</string>
+<key>CFBundleIdentifier</key><string>org.qtproject.$name</string>
+<key>CFBundleName</key><string>$name</string>
+<key>CFBundlePackageType</key><string>FMWK</string>
+<key>CFBundleShortVersionString</key><string>5.15</string>
+<key>CFBundleVersion</key><string>5.15</string>
+<key>MinimumOSVersion</key><string>16.0</string>
+</dict></plist>
+PLIST
 done
 
 cp "$APP/Contents/MacOS/libmimalloc.3.dylib" "$APP_OUT/Frameworks/"
@@ -90,7 +108,7 @@ echo "=== patching guest and Qt ==="
 patch_one "$APP_OUT/Frameworks/StudioKit.framework/StudioKit" main
 for fw in "$APP_OUT/Frameworks/Qt"*.framework; do
   name="$(basename "$fw" .framework)"
-  patch_one "$fw/Versions/5/$name"
+  patch_one "$fw/$name"
 done
 patch_one "$APP_OUT/Frameworks/libmimalloc.3.dylib"
 patch_one "$APP_OUT/libfbxsdk.dylib"

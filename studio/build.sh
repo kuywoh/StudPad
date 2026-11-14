@@ -114,5 +114,6 @@ du -sh "$APP_OUT"
 
 echo "=== packaging ==="
 (cd "$OUT" && zip -qry "$WORK/StudPadStudioProbe.ipa" Payload)
+python3 verify.py "$WORK/StudPadStudioProbe.ipa"
 ls -lh "$WORK/StudPadStudioProbe.ipa"
 echo "built $WORK/StudPadStudioProbe.ipa"

@@ -76,12 +76,17 @@ done
 ls -1 "$STAGE/qt" "$STAGE/plugins"/* | head -40
 
 step "retarget pass 1: platform, paths, shim redirect, MH_DYLIB"
-retarget "$STAGE/StudioKit" "$APP/Frameworks/StudioKit" --main
+retarget "$STAGE/StudioKit" "$APP/Frameworks/StudioKit"
 for lib in "$STAGE/qt/"*.dylib; do
   retarget "$lib" "$APP/Frameworks/$(basename "$lib")"
 done
 for lib in "$STAGE/"*.dylib; do
-  retarget "$lib" "$APP/Frameworks/$(basename "$lib")"
+  [ -f "$lib" ] || continue
+  # Studio loads libfbxsdk from @executable_path, the rest through @rpath/Frameworks.
+  case "$(basename "$lib")" in
+    libfbxsdk*) retarget "$lib" "$APP/$(basename "$lib")" ;;
+    *) retarget "$lib" "$APP/Frameworks/$(basename "$lib")" ;;
+  esac
 done
 for plugin in "$STAGE/plugins"/*/*.dylib; do
   retarget "$plugin" "$APP/Frameworks/PlugIns/$(basename "$(dirname "$plugin")")/$(basename "$plugin")"
@@ -102,7 +107,8 @@ CC=(xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 -fobjc-arc
 
 step "plan the stubs: what Studio needs that the iOS SDK does not export"
 SHIPPED=()
-for lib in "$APP/Frameworks/"*.dylib "$APP/Frameworks/StudioKit"; do
+for lib in "$APP/Frameworks/"*.dylib "$APP/Frameworks/StudioKit" "$APP/"*.dylib; do
+  [ -f "$lib" ] || continue
   [ "$(basename "$lib")" = "libMacShim.dylib" ] && continue
   SHIPPED+=("$lib")
 done
@@ -161,10 +167,11 @@ step "check every import the shim has to satisfy"
 python3 "$ROOT/tools/check_binds.py" "$APP"
 
 step "ad-hoc sign, carrying the entitlements the IPA asks for"
-find "$APP" -type f -perm +111 | while read -r binary; do
-  case "$(file -b "$binary")" in
-    *Mach-O*) codesign -f -s - "$binary" 2>/dev/null || echo "  sign failed: $binary" ;;
-  esac
+# Nested images first, then the bundle: codesign seals what it finds inside.
+for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/StudPadStudio" \
+  "$APP/Frameworks/"*.dylib "$APP/"*.dylib "$APP/Frameworks/PlugIns/"*/*.dylib; do
+  [ -f "$binary" ] || continue
+  codesign -f -s - "$binary" 2>/dev/null || echo "  ad-hoc sign failed: $binary"
 done
 codesign -f -s - --entitlements "$ROOT/app/entitlements-sideload.plist" "$APP"
 codesign -d --entitlements - "$APP" 2>&1 | sed -n '1,40p' || true

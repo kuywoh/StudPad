@@ -134,14 +134,16 @@ static void crash_signal(int sig) {
 
 @end
 
+static void uncaught_exception(NSException *exception) {
+    NSString *text = [NSString stringWithFormat:@"NSException %@: %@\n%@", exception.name,
+                                                exception.reason,
+                                                exception.callStackSymbols.description];
+    host_log(text.UTF8String);
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
-        NSSetUncaughtExceptionHandler(^(NSException *exception) {
-            host_log([NSString stringWithFormat:@"NSException %@: %@\n%@", exception.name,
-                                                exception.reason,
-                                                exception.callStackSymbols.description]
-                         .UTF8String);
-        });
+        NSSetUncaughtExceptionHandler(uncaught_exception);
         for (int sig = 1; sig < NSIG; sig++) {
             if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) continue;
             signal(sig, crash_signal);

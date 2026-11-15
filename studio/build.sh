@@ -23,7 +23,12 @@ SDK_NAME="$(plutil -extract CanonicalName raw "$SDK/SDKSettings.plist" 2>/dev/nu
 case "$SDK_VER" in [0-9]*.[0-9]*) ;; [0-9]*) SDK_VER="$SDK_VER.0" ;; *) SDK_VER="26.0" ;; esac
 IOS_MIN=16.0
 
-step() { printf '\n=== %s ===\n' "$*"; }
+step() {
+  printf '\n=== %s ===\n' "$*"
+  # Also an annotation, so a run in progress shows which stage it reached to anyone reading the
+  # public checks API without access to the job log.
+  echo "::notice title=stage::$*"
+}
 
 # A failed step in CI is otherwise just "exit code 1" in the UI, so turn the tail of the log into
 # error annotations: the run page and the public checks API then carry the actual message.

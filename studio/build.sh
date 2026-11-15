@@ -213,11 +213,23 @@ retarget2() {
 }
 
 link() {
-  step "link libMacShim.dylib"
+  step "compile the shim sources"
   local sources=("$WORK/stubs.c" "$WORK/stubs_objc.m")
   [ -f "$WORK/stubs_asm.s" ] && sources+=("$WORK/stubs_asm.s")
-  guard 600 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -dynamiclib -fobjc-arc \
-    -O1 -I"$ROOT/shim" -install_name @rpath/libMacShim.dylib \
+  wc -l "${sources[@]}" || true
+  local cc=(xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -c -fobjc-arc -O1
+    -I"$ROOT/shim" -Wno-deprecated-declarations)
+  local objs=() src obj
+  for src in "$ROOT/shim/MacShim.m" "${sources[@]}"; do
+    obj="$WORK/obj-$(basename "$src").o"
+    guard 600 "${cc[@]}" "$src" -o "$obj"
+    echo "  $(basename "$src") -> $(wc -c <"$obj" | tr -d ' ') bytes"
+    objs+=("$obj")
+  done
+
+  step "link libMacShim.dylib"
+  guard 600 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -dynamiclib \
+    -install_name @rpath/libMacShim.dylib \
     -compatibility_version 9999.0.0 -current_version 9999.0.0 \
     -framework Foundation -framework UIKit -framework CoreGraphics -framework QuartzCore \
     -framework CoreFoundation -framework Security -framework Metal -framework CoreText \
@@ -229,7 +241,7 @@ link() {
     -Wl,-reexport_framework,ImageIO -Wl,-reexport_framework,Security \
     -Wl,-reexport_framework,Metal -Wl,-reexport_framework,GameController \
     -Wl,-reexport_framework,UniformTypeIdentifiers -Wl,-reexport_framework,AudioToolbox \
-    "$ROOT/shim/MacShim.m" "${sources[@]}" -o "$APP/Frameworks/libMacShim.dylib"
+    "${objs[@]}" -o "$APP/Frameworks/libMacShim.dylib"
 }
 
 host() {

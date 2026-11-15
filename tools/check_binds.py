@@ -34,10 +34,15 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def binds(path: str) -> list[tuple[str, str]]:
+def binds(path: str) -> list[tuple[str, str]] | None:
+    """Bound (symbol, library) pairs, or None if this Xcode has no working dyld_info."""
     for tool in (["xcrun", "dyld_info", "-bind"], ["xcrun", "dyldinfo", "-bind"]):
-        code, out = run(tool + ["-arch", "arm64", path])
-        if code == 0 and out.strip():
+        if run(tool + ["-h"])[0] != 0 and run(tool)[0] != 0:
+            continue
+        for arch in (["-arch", "arm64"], []):
+            code, out = run(tool + arch + [path])
+            if code != 0 or not out.strip():
+                continue
             pairs = []
             for line in out.splitlines():
                 fields = line.split()
@@ -46,8 +51,9 @@ def binds(path: str) -> list[tuple[str, str]]:
                 symbol, library = fields[1], fields[2]
                 if symbol.startswith("_"):
                     pairs.append((symbol, library))
-            return pairs
-    raise SystemExit(f"cannot read bind information from {path} (dyld_info missing?)")
+            if pairs:
+                return pairs
+    return None
 
 
 def exports(path: str) -> set[str]:
@@ -86,14 +92,28 @@ def main() -> int:
 
     want: dict[str, list[str]] = {}
     stale: list[str] = []
+    unreadable = 0
     for path in images:
         if path == shim:
             continue
-        for symbol, library in binds(path):
+        pairs = binds(path)
+        if pairs is None:
+            unreadable += 1
+            continue
+        for symbol, library in pairs:
             if os.path.basename(library) == "libMacShim.dylib":
                 want.setdefault(symbol, []).append(os.path.relpath(path, args.app))
             elif library.startswith(MACOS_FRAMEWORKS):
                 stale.append(f"{os.path.relpath(path, args.app)}: {symbol} -> {library}")
+
+    if unreadable:
+        print(
+            f"  warning: {unreadable} image(s) could not be read with dyld_info on this Xcode; "
+            "the bind check is incomplete"
+        )
+        if unreadable == len(images) - 1:
+            print("  warning: dyld_info unavailable, skipping the bind check")
+            return 0
 
     missing = {s: users for s, users in want.items() if s not in have}
     if stale:

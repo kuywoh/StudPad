@@ -43,13 +43,16 @@ jobs:
           xcrun --find dyld_info || xcrun --find dyldinfo || echo "no dyld_info"
 
       - name: Build
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           set -o pipefail
           chmod +x studio/build.sh recon/fetch_studio.sh
           studio/build.sh 2>&1 | tee .work-build.log || {
             status=$?
-            echo "build failed, last 200 lines:"
-            tail -n 200 .work-build.log
+            echo "::error title=studio/build.sh exited nonzero::status $status"
+            echo "build failed, last 120 lines:"
+            tail -n 120 .work-build.log
             exit $status
           }
 

@@ -23,6 +23,22 @@ IOS_MIN=16.0
 
 step() { printf '\n=== %s ===\n' "$*"; }
 
+# A failed step in CI is otherwise just "exit code 1" in the UI, so turn the tail of the log into
+# error annotations: the run page and the public checks API then carry the actual message.
+annotate_failure() {
+  local status=$? line=${BASH_LINENO[0]:-?}
+  echo "::error title=build.sh failed at line $line::exit status $status"
+  local log="$ROOT/.work-build.log"
+  [ -f "$log" ] || log="/dev/null"
+  grep -aiE 'error|fail|cannot|can.t|not found|unsupported|refus|traceback|no such|denied' "$log" \
+    | tail -n 8 | while IFS= read -r text; do
+      text=${text//'%'/%25}
+      text=${text//$'\r'/}
+      echo "::error::$text"
+    done || true
+}
+trap annotate_failure ERR
+
 retarget() { # src dst [extra ios_retarget args]
   local src="$1" dst="$2"
   shift 2

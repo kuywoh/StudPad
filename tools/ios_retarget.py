@@ -286,54 +286,76 @@ def _skip_uleb(data: bytearray, i: int) -> int:
     return i + 1
 
 
+def _bad_opcode(data: bytearray, pos: int, which: str) -> None:
+    snippet = bytes(data[max(0, pos - 8) : pos + 12]).hex()
+    raise SystemExit(
+        f"{which}: unsupported bind opcode {data[pos]:#04x} at stream offset {pos} "
+        f"(around {snippet}); this build uses a bind encoding StudPad does not handle yet"
+    )
+
+
+def _bind_step(data: bytearray, i: int, end: int, which: str) -> tuple[int, str, int | None]:
+    """Walk one dyld-info bind opcode. Returns (next offset, kind, value).
+
+    kind is "ordinal_imm", "ordinal_uleb", "symbol" or "other"; value is the operand for the two
+    ordinal forms. The opcode table is dyld's BindOpcodes.h.
+    """
+    raw = data[i]
+    op, imm = raw & 0xF0, raw & 0x0F
+    i += 1
+    if op == 0x10:  # SET_DYLIB_ORDINAL_IMM
+        return i, "ordinal_imm", imm
+    if op == 0x20:  # SET_DYLIB_ORDINAL_ULEB
+        value, j = _uleb(data, i)
+        return j, "ordinal_uleb", value
+    if op == 0x40:  # SET_SYMBOL_TRAILING_FLAGS_IMM
+        nul = data.find(b"\0", i, end)
+        if nul < 0:
+            raise SystemExit(f"{which}: unterminated bind symbol at {i}")
+        return nul + 1, "symbol", None
+    if op in (0x00, 0x30, 0x50, 0x90, 0xB0):  # DONE / SPECIAL_IMM / TYPE_IMM / DO_BIND / IMM_SCALED
+        return i, "other", None
+    if op in (0x60, 0x70, 0x80, 0xA0):  # ADDEND_SLEB / SEGMENT+ULEB / ADD_ADDR / DO_BIND+ULEB
+        return _skip_uleb(data, i), "other", None
+    if op == 0xC0:  # DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+        return _skip_uleb(data, _skip_uleb(data, i)), "other", None
+    if op == 0xD0:  # THREADED: 0 = SET_BIND_ORDINAL_TABLE_SIZE_ULEB, 1 = APPLY
+        if imm == 0:
+            return _skip_uleb(data, i), "other", None
+        if imm == 1:
+            return i, "other", None
+    _bad_opcode(data, i - 1, which)
+    raise AssertionError("unreachable")
+
+
 def remap_binds(data: bytearray, off: int, size: int, remap: dict[int, int], which: str) -> int:
     """Renumber dylib ordinals in a dyld-info stream (ordinals only ever shrink)."""
     if not size:
         return 0
     i, end, changed = off, off + size, 0
     while i < end:
-        raw = data[i]
-        op, imm = raw & 0xF0, raw & 0x0F
-        i += 1
-        if op == 0x10:
-            if imm in remap:
-                data[i - 1] = 0x10 | remap[imm]
-                changed += 1
-        elif op == 0x20:
-            value, j = _uleb(data, i)
-            if value in remap:
-                new = remap[value]
-                width = j - i
-                enc = bytearray()
-                while True:
-                    b = new & 0x7F
-                    new >>= 7
-                    enc.append(b | (0x80 if new else 0))
-                    if not new:
-                        break
-                if len(enc) != width:
-                    raise SystemExit(
-                        f"{which}: ordinal {value}->{new} needs {len(enc)} bytes, stream has {width}"
-                    )
-                data[i:j] = enc
-                changed += 1
-            i = j
-        elif op in (0x00, 0x30, 0x50, 0x90, 0xB0):
-            continue
-        elif op in (0x40,):
-            nul = data.find(b"\0", i, end)
-            if nul < 0:
-                raise SystemExit(f"{which}: unterminated bind symbol")
-            i = nul + 1
-        elif op in (0x60, 0x70, 0x80, 0xA0):
-            i = _skip_uleb(data, i)
-        elif op == 0xC0:
-            i = _skip_uleb(data, _skip_uleb(data, i))
-        elif op == 0xF0:
-            if imm == 0:
-                i = _skip_uleb(data, i)
-        else:
-            raise SystemExit(f"{which}: unsupported bind opcode {raw:#x} at {i - 1}")
+        pos = i
+        i, kind, value = _bind_step(data, i, end, which)
+        if kind == "ordinal_imm" and value in remap:
+            data[pos] = 0x10 | remap[value]
+            changed += 1
+        elif kind == "ordinal_uleb" and value in remap:
+            new = remap[value]
+            width = i - (pos + 1)
+            enc = bytearray()
+            v = new
+            while True:
+                b = v & 0x7F
+                v >>= 7
+                enc.append(b | (0x80 if v else 0))
+                if not v:
+                    break
+            if len(enc) != width:
+                raise SystemExit(
+                    f"{which}: ordinal {value}->{new} needs {len(enc)} bytes, stream has {width}"
+                )
+            data[pos + 1 : i] = enc
+            changed += 1
     return changed
 
 
@@ -487,34 +509,19 @@ def reroute_binds(
     i, end = off, off + size
     pending: tuple[str, int] | None = None
     while i < end:
-        raw = data[i]
-        op, imm = raw & 0xF0, raw & 0x0F
-        i += 1
-        if op == 0x10:
-            pending = ("imm", i - 1)
-        elif op == 0x20:
-            pending = ("uleb", i)
-            i = _skip_uleb(data, i)
-        elif op == 0x40:
-            nul = data.find(b"\0", i, end)
-            name = bytes(data[i:nul]).decode("utf-8", "replace")
+        pos = i
+        i, kind, _value = _bind_step(data, i, end, "reroute")
+        if kind == "ordinal_imm":
+            pending = ("imm", pos)
+        elif kind == "ordinal_uleb":
+            pending = ("uleb", pos + 1)
+        elif kind == "symbol":
+            name = bytes(data[pos + 1 : i - 1]).decode("utf-8", "replace")
             if name in names and pending is not None:
                 if _set_ordinal(data, pending[0], pending[1], ordinal):
                     done.add(name)
                 else:
                     raise SystemExit(f"{name}: ordinal opcode has no room for the shim ordinal")
-            i = nul + 1
-        elif op in (0x00, 0x30, 0x50, 0x90, 0xB0):
-            continue
-        elif op in (0x60, 0x70, 0x80, 0xA0):
-            i = _skip_uleb(data, i)
-        elif op == 0xC0:
-            i = _skip_uleb(data, _skip_uleb(data, i))
-        elif op == 0xF0:
-            if imm == 0:
-                i = _skip_uleb(data, i)
-        else:
-            raise SystemExit(f"unsupported bind opcode {raw:#x} at {i - 1}")
     return done
 
 

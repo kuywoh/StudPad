@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Carried by the ad-hoc signature inside StudPadStudio.ipa.
+
+     SideStore (and AltStore/Sideloadly) sign with (profile entitlements) ∩ (these), so a capability
+     only ends up in the installed app when BOTH the App ID has it and this file lists it:
+
+       get-task-allow                  StikDebug can attach and enable JIT for the app
+       increased-memory-limit          a free Apple ID gets this via GetMoreRam on the App ID
+       extended-virtual-addressing     paid Apple Developer accounts only
+
+     Studio is a desktop IDE with a 200 MB executable plus Qt; the iPad Air's default per-app limit is
+     the first thing it will hit. Free Apple ID: run GetMoreRam, pick this App ID
+     (com.kuywoh.studpadstudio), "Add Increased Memory Limit", then reinstall/refresh in SideStore.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+</dict>
+</plist>

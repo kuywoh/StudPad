@@ -1,0 +1,76 @@
+name: studio-build
+
+# Builds StudPad Studio: the official arm64 macOS Studio, retargeted for iOS, loaded through
+# libMacShim.dylib. The IPA contains Studio and is therefore only ever a private artifact of this
+# job; nothing binary is committed. Text reports are uploaded even when the build fails.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "shim/**"
+      - "app/**"
+      - "tools/**"
+      - "studio/**"
+      - "recon/fetch_studio.sh"
+      - ".github/workflows/studio-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select an iOS 26 SDK Xcode
+        run: |
+          set -euo pipefail
+          for candidate in /Applications/Xcode_26.3.app /Applications/Xcode_26.2.app /Applications/Xcode_26.1.app /Applications/Xcode_26.0.app; do
+            if [ -d "$candidate" ]; then
+              sudo xcode-select -s "$candidate"
+              break
+            fi
+          done
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --find dyld_info || xcrun --find dyldinfo || echo "no dyld_info"
+
+      - name: Build
+        run: |
+          set -o pipefail
+          chmod +x studio/build.sh recon/fetch_studio.sh
+          studio/build.sh 2>&1 | tee .work-build.log || {
+            status=$?
+            echo "build failed, last 200 lines:"
+            tail -n 200 .work-build.log
+            exit $status
+          }
+
+      - name: Upload build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-build-report-${{ github.run_number }}
+          path: |
+            .work-build.log
+            .work/studio/shim-plan.txt
+            .work/studio/retarget.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudPadStudio-ipa
+          path: |
+            .work/studio/StudPadStudio.ipa
+            .work/studio/StudPadStudio.ipa.sha256
+          if-no-files-found: error
+          retention-days: 3

@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
-"""Fail the build unless the probe IPA has the Mach-O shape the host expects."""
+"""Refuse the build unless the IPA has the shape the host and dyld expect.
+
+Structural only: it proves the packaging, the retargeting and the linking happened, not that Studio
+runs. What Studio does is in Documents/studio.log on the iPad.
+"""
+
+import os
 import plistlib
 import struct
+import subprocess
 import sys
 import zipfile
 
 MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
-MH_BUNDLE = 8
+MH_DYLIB = 6
 LC_LOAD_DYLIB = 0xC
+LC_ID_DYLIB = 0xD
 LC_LOAD_WEAK_DYLIB = 0x80000018
-LC_DYLD_INFO = 0x22
-LC_DYLD_INFO_ONLY = 0x80000022
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+LC_REEXPORT_DYLIB = 0x8000001F
 LC_MAIN = 0x80000028
 LC_BUILD_VERSION = 0x32
-LC_CODE_SIGNATURE = 0x1D
 
-GUEST = "Payload/StudPadStudioProbe.app/Frameworks/StudioKit"
-HOST = "Payload/StudPadStudioProbe.app/StudPadStudioProbe"
-QTCORE = "Payload/StudPadStudioProbe.app/Frameworks/libQtCore.dylib"
+DYLIB_CMDS = {LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB}
+LOAD_DYLIB_CMDS = {LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB}
+
+ROOT = "Payload/StudPadStudio.app"
+GUEST = f"{ROOT}/Frameworks/StudioKit"
+HOST = f"{ROOT}/StudPadStudio"
+SHIM = f"{ROOT}/Frameworks/libMacShim.dylib"
+QTCORE = f"{ROOT}/Frameworks/libQtCore.dylib"
+QCOCOA = f"{ROOT}/Frameworks/PlugIns/platforms/libqcocoa.dylib"
 
 
 def fail(msg):
@@ -26,7 +39,7 @@ def fail(msg):
 
 
 def commands(data):
-    magic, _cpu, _sub, filetype, ncmds, sizeofcmds, _flags, _ = struct.unpack_from(
+    magic, _cpu, _sub, filetype, ncmds, _sizeofcmds, _flags, _ = struct.unpack_from(
         "<IiiIIIII", data, 0
     )
     if magic != MH_MAGIC_64:
@@ -47,134 +60,90 @@ def dylib_path(data, off, cmdsize):
     return data[start:end].decode()
 
 
-def bind_stats(data, off, size):
-    i, end = off, off + size
-    total = weak = 0
-    while i < end:
-        raw = data[i]
-        op = raw & 0xF0
-        i += 1
-        if op == 0:
-            continue
-        if op in (0x10, 0x30, 0x50, 0x90, 0xB0):
-            continue
-        if op in (0x20, 0x70, 0x80, 0xA0, 0x60):
-            while i < end:
-                b = data[i]
-                i += 1
-                if not b & 0x80:
-                    break
-            continue
-        if op == 0x40:
-            total += 1
-            if raw & 1:
-                weak += 1
-            i = data.index(b"\0", i, end) + 1
-            continue
-        if op == 0xC0:
-            for _ in range(2):
-                while i < end:
-                    b = data[i]
-                    i += 1
-                    if not b & 0x80:
-                        break
-            continue
-        fail(f"unexpected bind opcode {raw:#x}")
-    return total, weak
-
-
-def main():
-    if len(sys.argv) != 2:
-        fail("usage: verify.py <ipa>")
-    z = zipfile.ZipFile(sys.argv[1])
-    names = set(z.namelist())
-    for required in (
-        HOST,
-        "Payload/StudPadStudioProbe.app/Info.plist",
-        GUEST,
-        "Payload/StudPadStudioProbe.app/Frameworks/libQtCore.dylib",
-        "Payload/StudPadStudioProbe.app/Frameworks/PlugIns/platforms/libqoffscreen.dylib",
-        "Payload/StudPadStudioProbe.app/libfbxsdk.dylib",
-        "Payload/StudPadStudioProbe.app/qt.conf",
-    ):
-        if required not in names:
-            fail(f"missing {required}")
-
-    data = z.read(GUEST)
+def inspect(data):
     filetype, cmds = commands(data)
-    if filetype != MH_BUNDLE:
-        fail(f"guest filetype is {filetype}, expected MH_BUNDLE")
     platform = None
     has_main = False
-    has_sig = False
-    weak_libs = []
-    mapped = []
-    total = weak = 0
+    install_id = None
+    loads = []
     for cmd, size, off in cmds:
         if cmd == LC_BUILD_VERSION:
             platform = struct.unpack_from("<I", data, off + 8)[0]
         elif cmd == LC_MAIN:
             has_main = True
-        elif cmd == LC_CODE_SIGNATURE:
-            has_sig = True
-        elif cmd in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB):
-            path = dylib_path(data, off, size)
-            if cmd == LC_LOAD_WEAK_DYLIB:
-                weak_libs.append(path)
-            if "Foundation.framework" in path or "WebKit.framework" in path:
-                mapped.append(path)
-            if "Qt" in path and ".framework" in path:
-                fail(f"guest still references a Qt framework bundle: {path}")
-        elif cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
-            fields = struct.unpack_from("<10I", data, off + 8)
-            for bo, bs in ((fields[2], fields[3]), (fields[6], fields[7])):
-                t, w = bind_stats(data, bo, bs)
-                total += t
-                weak += w
-    if platform != 2:
-        fail(f"guest platform is {platform}, expected iOS (2)")
-    if not has_main:
-        fail("guest has no LC_MAIN")
-    if not total or weak != total:
-        fail(f"guest weak bindings {weak}/{total}, expected all")
-    if not any("AppKit.framework" in p for p in weak_libs):
-        fail("guest does not mark AppKit weak")
-    if not any("Foundation.framework" in p for p in mapped):
-        fail("guest does not map Foundation to the iOS path")
+        elif cmd == LC_ID_DYLIB:
+            install_id = dylib_path(data, off, size)
+        elif cmd in LOAD_DYLIB_CMDS:
+            loads.append(dylib_path(data, off, size))
+    return dict(filetype=filetype, platform=platform, has_main=has_main, id=install_id, loads=loads)
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("usage: verify.py <ipa>")
+    ipa = sys.argv[1]
+    z = zipfile.ZipFile(ipa)
+    names = set(z.namelist())
+
+    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, QTCORE, QCOCOA, f"{ROOT}/qt.conf"):
+        if required not in names:
+            fail(f"missing {required}")
+
+    guest = inspect(z.read(GUEST))
+    if guest["filetype"] != MH_DYLIB:
+        fail(f"guest filetype {guest['filetype']}, expected MH_DYLIB ({MH_DYLIB})")
+    if guest["platform"] != 2:
+        fail(f"guest platform {guest['platform']}, expected iOS (2)")
+    if not guest["has_main"]:
+        fail("guest has no LC_MAIN: the host cannot find Studio's entry point")
+    if guest["id"] != "@rpath/StudioKit.dylib":
+        fail(f"guest LC_ID_DYLIB is {guest['id']!r}")
+    if "@rpath/libMacShim.dylib" not in guest["loads"]:
+        fail("guest does not link libMacShim.dylib: AppKit was not redirected")
+    for path in guest["loads"]:
+        if ".framework/Versions/" in path:
+            fail(f"guest still uses a macOS framework layout: {path}")
+        if path.startswith("/System/Library/Frameworks/") and ".framework/Versions" not in path:
+            name = path.split("/")[4].split(".")[0]
+            if name in ("AppKit", "Cocoa", "Carbon", "ApplicationServices"):
+                fail(f"guest still imports {path}: it would not load on iOS")
+
+    qt = inspect(z.read(QTCORE))
+    if qt["filetype"] != MH_DYLIB or qt["platform"] != 2:
+        fail(f"QtCore filetype/platform {qt['filetype']}/{qt['platform']}, expected 6/2")
+    if qt["id"] != "@rpath/libQtCore.dylib":
+        fail(f"QtCore LC_ID_DYLIB is {qt['id']!r}, expected the flat name")
+
+    shim = inspect(z.read(SHIM))
+    if shim["filetype"] != MH_DYLIB or shim["platform"] != 2:
+        fail(f"shim filetype/platform {shim['filetype']}/{shim['platform']}, expected 6/2")
+    if shim["id"] != "@rpath/libMacShim.dylib":
+        fail(f"shim LC_ID_DYLIB is {shim['id']!r}")
 
     host_data = z.read(HOST)
-    host_type, host_cmds = commands(host_data)
-    host_platform = next(
-        (struct.unpack_from("<I", host_data, off + 8)[0] for cmd, _s, off in host_cmds if cmd == LC_BUILD_VERSION),
-        None,
-    )
-    if host_type != MH_EXECUTE or host_platform != 2:
-        fail(f"host filetype/platform {host_type}/{host_platform}, expected 2/2")
-
-    qt_data = z.read(QTCORE)
-    qt_type, qt_cmds = commands(qt_data)
-    qt_platform = next(
-        (struct.unpack_from("<I", qt_data, off + 8)[0] for cmd, _s, off in qt_cmds if cmd == LC_BUILD_VERSION),
-        None,
-    )
-    if qt_type != 6 or qt_platform != 2:
-        fail(f"QtCore filetype/platform {qt_type}/{qt_platform}, expected 6/2")
-
-    plist = plistlib.loads(z.read("Payload/StudPadStudioProbe.app/Info.plist"))
-    if plist.get("UIFileSharingEnabled") is not True:
-        fail("Documents sharing is off")
-    host_name = plist.get("CFBundleExecutable")
-    if host_name != "StudPadStudioProbe":
-        fail(f"CFBundleExecutable is {host_name!r}, expected StudPadStudioProbe")
-    info = z.getinfo(HOST)
-    mode = (info.external_attr >> 16) & 0o777
+    host = inspect(host_data)
+    if host["filetype"] != MH_EXECUTE or host["platform"] != 2:
+        fail(f"host filetype/platform {host['filetype']}/{host['platform']}, expected 2/2")
+    if "@rpath/libMacShim.dylib" not in host["loads"]:
+        fail("host does not link the shim, so studpad_guest_start cannot be called")
+    mode = (z.getinfo(HOST).external_attr >> 16) & 0o777
     if not mode & 0o111:
-        fail(f"host executable mode is {mode:o}, expected an executable bit")
+        fail(f"host executable mode is {mode:o}")
+
+    plist = plistlib.loads(z.read(f"{ROOT}/Info.plist"))
+    if plist.get("CFBundleExecutable") != "StudPadStudio":
+        fail(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}")
+    if plist.get("UIFileSharingEnabled") is not True:
+        fail("Documents sharing is off: the log would not be readable")
+    if "UIApplicationSceneManifest" not in plist:
+        fail("no scene manifest: iPadOS 26 leaves the app on a black screen")
+
+    if not any(name.startswith(f"{ROOT}/Resources/") for name in names):
+        print("warning: no Resources/ in the IPA; Studio's assets may be missing")
 
     print(
-        f"verify: guest MH_BUNDLE iOS, LC_MAIN, weak binds {weak}/{total}, "
-        f"signature blob present={has_sig}; host MH_EXECUTE iOS mode={mode:o}; "
-        f"CFBundleExecutable={host_name}; QtCore dylib iOS; "
+        f"verify: guest MH_DYLIB iOS + LC_MAIN + shim link; QtCore flat dylib; "
+        f"shim {len(shim['loads'])} re-exported frameworks; host MH_EXECUTE iOS mode={mode:o}; "
         f"IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )
 

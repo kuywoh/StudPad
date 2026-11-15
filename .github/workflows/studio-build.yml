@@ -20,7 +20,8 @@ permissions:
 
 concurrency:
   group: studio-build
-  cancel-in-progress: false
+  # A newer push replaces an older build; a stuck run must never block the next attempt.
+  cancel-in-progress: true
 
 jobs:
   build:

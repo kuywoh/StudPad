@@ -39,15 +39,15 @@ MACOS_FRAMEWORKS = (
 
 
 def run(cmd: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # stdin is explicitly empty: a tool given no file argument (dyld_info) would otherwise read
+    # stdin and block a CI job forever.
+    proc = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return proc.returncode, proc.stdout + proc.stderr
 
 
 def binds(path: str) -> list[tuple[str, str]] | None:
     """Bound (symbol, library) pairs, or None if this Xcode has no working dyld_info."""
     for tool in (["xcrun", "dyld_info", "-bind"], ["xcrun", "dyldinfo", "-bind"]):
-        if run(tool + ["-h"])[0] != 0 and run(tool)[0] != 0:
-            continue
         for arch in (["-arch", "arm64"], []):
             code, out = run(tool + arch + [path])
             if code != 0 or not out.strip():

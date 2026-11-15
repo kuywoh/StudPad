@@ -9,6 +9,8 @@
 # No Roblox binary is committed. The package is downloaded inside the job, the IPA is a private
 # workflow artifact, and everything lives under .work/ (gitignored).
 set -euo pipefail
+# No tool may ever wait for input: a command that reads stdin would hang the whole job.
+exec < /dev/null
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 WORK="$ROOT/.work/studio"

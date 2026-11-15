@@ -65,7 +65,10 @@ REEXPORTS = [
 
 def undefined(path: str) -> set[str]:
     out = subprocess.run(
-        ["xcrun", "nm", "-u", "-arch", "arm64", path], capture_output=True, text=True
+        ["xcrun", "nm", "-u", "-arch", "arm64", path],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     ).stdout
     names = set()
     for line in out.splitlines():

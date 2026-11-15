@@ -14,8 +14,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import struct
 import subprocess
 import sys
+
+LC_LOAD_DYLIB = 0xC
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+DYLIB_CMDS = {LC_LOAD_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_WEAK_DYLIB, LC_LOAD_UPWARD_DYLIB}
+SDK_SYMBOL = re.compile(rb"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
 
 MACOS_FRAMEWORKS = (
     "/System/Library/Frameworks/AppKit.framework",
@@ -63,6 +72,62 @@ def exports(path: str) -> set[str]:
     return {line.split()[-1] for line in out.splitlines() if line.split()}
 
 
+def load_commands(path: str) -> list[tuple[int, int, int, bytes]]:
+    """(cmd, cmdsize, offset, data) for a thin little-endian Mach-O; used for its re-exports."""
+    with open(path, "rb") as f:
+        data = f.read()
+    magic, _cpu, _sub, _ftype, ncmds, _szcmds, _flags, _res = struct.unpack_from("<IIIIIIII", data, 0)
+    if magic != 0xFEEDFACF:
+        return []
+    out = []
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, off)
+        out.append((cmd, size, off, data))
+        off += size
+    return out
+
+
+def dylib_path(entry) -> str:
+    cmd, size, off, data = entry
+    name_off = struct.unpack_from("<I", data, off + 8)[0]
+    start = off + name_off
+    end = data.index(b"\0", start, off + size)
+    return data[start:end].decode("utf-8", "replace")
+
+
+def tbd_for(library: str, sdk: str) -> str | None:
+    m = re.match(r"^/System/Library/(?:Private)?Frameworks/([A-Za-z0-9_]+)\.framework/", library)
+    if m:
+        name = m.group(1)
+        for prefix in ("Frameworks", "PrivateFrameworks"):
+            candidate = os.path.join(sdk, "System/Library", prefix, f"{name}.framework", f"{name}.tbd")
+            if os.path.exists(candidate):
+                return candidate
+        return None
+    m = re.match(r"^/usr/lib/([A-Za-z0-9_.+]+?)(?:\.dylib)$", library)
+    if m:
+        candidate = os.path.join(sdk, "usr/lib", f"{m.group(1)}.tbd")
+        return candidate if os.path.exists(candidate) else None
+    return None
+
+
+def reexported_symbols(shim: str, sdk: str) -> set[str]:
+    """Symbols the shim answers through -reexport_framework (nm does not list those itself)."""
+    found: set[str] = set()
+    for entry in load_commands(shim):
+        if entry[0] != LC_REEXPORT_DYLIB:
+            continue
+        library = dylib_path(entry)
+        tbd = tbd_for(library, sdk)
+        if not tbd:
+            print(f"  warning: no .tbd for re-exported {library}")
+            continue
+        with open(tbd, "rb") as f:
+            found.update(m.group(0).decode() for m in SDK_SYMBOL.finditer(f.read()))
+    return found
+
+
 def machos(root: str) -> list[str]:
     found = []
     for base, _dirs, files in os.walk(root):
@@ -80,12 +145,15 @@ def machos(root: str) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("app")
+    ap.add_argument("--sdk", help="iOS SDK path, for the shim's re-exported frameworks")
     args = ap.parse_args()
 
     shim = os.path.join(args.app, "Frameworks", "libMacShim.dylib")
     if not os.path.exists(shim):
         raise SystemExit(f"missing {shim}")
     have = exports(shim)
+    if args.sdk:
+        have |= reexported_symbols(shim, args.sdk)
 
     images = machos(args.app)
     print(f"  {len(images)} Mach-O images, shim exports {len(have)} symbols")

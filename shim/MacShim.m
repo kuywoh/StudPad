@@ -500,12 +500,12 @@ static void ms_pump(double seconds) {
 @end
 
 // AppKit constants are pointer variables on macOS (code loads the value), so they are defined as
-// variables here, not as functions.
-NSString *NSDefaultRunLoopMode = @"kCFRunLoopDefaultMode";
-NSString *NSRunLoopCommonModes = @"kCFRunLoopCommonModes";
-NSString *NSEventTrackingRunLoopMode = @"NSEventTrackingRunLoopMode";
-NSString *NSModalPanelRunLoopMode = @"NSModalPanelRunLoopMode";
-NSString *NSApplicationDidFinishLaunchingNotification = @"NSApplicationDidFinishLaunchingNotification";
+// variables here, not as functions. NSDefaultRunLoopMode and NSRunLoopCommonModes are *not* here:
+// iOS Foundation declares and exports them, and Studio binds them through the shim's re-export.
+NSString *const NSEventTrackingRunLoopMode = @"NSEventTrackingRunLoopMode";
+NSString *const NSModalPanelRunLoopMode = @"NSModalPanelRunLoopMode";
+NSString *const NSApplicationDidFinishLaunchingNotification =
+    @"NSApplicationDidFinishLaunchingNotification";
 
 void NSBeep(void) { AudioServicesPlaySystemSound(1104); }
 void NSApplicationLoad(void) { }

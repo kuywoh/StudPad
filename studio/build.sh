@@ -180,7 +180,7 @@ plutil -replace CFBundleShortVersionString -string \
   "$APP/Info.plist" 2>/dev/null || true
 
 step "check every import the shim has to satisfy"
-python3 "$ROOT/tools/check_binds.py" "$APP"
+python3 "$ROOT/tools/check_binds.py" "$APP" --sdk "$SDK"
 
 step "ad-hoc sign, carrying the entitlements the IPA asks for"
 # Nested images first, then the bundle: codesign seals what it finds inside.

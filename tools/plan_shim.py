@@ -2,22 +2,22 @@
 """Work out which symbols Studio needs that iOS cannot supply, and write stubs for them.
 
 Every macOS framework Studio imports is either remapped to an iOS framework or redirected to
-libMacShim.dylib by tools/ios_retarget.py. Redirecting is not enough on its own: the shim has to
-*export* the symbols those frameworks used to provide, or dyld stops with "Symbol not found".
+libMacShim.dylib by tools/ios_retarget.py. Redirecting is not enough on its own: with a two-level
+namespace a bind resolves only against the library its import record names, so:
 
-    needed   every undefined symbol of the guest and of the libraries we ship with it (nm -u)
-    have     symbols the iOS SDK exports (every .tbd under the SDK) minus symbols our shipped
-             libraries and the hand-written shim already define
-    stubs    needed - have
+  * a symbol bound to libMacShim.dylib must be exported *by the shim* — which means the shim's own
+    code plus the frameworks it re-exports. iOS having the symbol in some other library (say
+    UIKitCore) does not help, and this is exactly the AppKit trap: `NSColor` exists on iOS but not
+    in anything the shim re-exports.
+  * a symbol bound to an iOS library must be exported by the SDK at all. If it is not (AppKit-era
+    leftovers like `_objc_msgSend_stret`, `glClearDepth`), it needs a stub *and* its import ordinal
+    rewritten to the shim.
 
-Two things are generated from that list:
+Outputs:
 
     stubs.c        a C function per symbol returning 0, logging the first time it is called
-    stubs_objc.m   an ObjC class per missing `_OBJC_CLASS_$_X`, inheriting MSStubObject, whose
-                   unknown methods log and return 0 (see shim/MacShim.m)
-
-A stub can never shadow a real iOS symbol because the iOS API surface is subtracted first, and
-every stub is rerouted to the shim by ordinal (only imports that name the shim bind to it).
+    stubs_objc.m   an ObjC class per missing `_OBJC_CLASS_$_X`, inheriting MSStubObject
+    reroute.txt    the symbols whose imports must move to the shim
 
 Known limit: the stub list has no type information, so a stub for a *constant* (`NSFooMode`) is a
 function, not a valid object, and a stub for a float- or struct-returning function returns 0 in the
@@ -33,6 +33,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from check_binds import binds, exports  # noqa: E402  (same tool directory)
+
 SDK_SYMBOL = re.compile(rb"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
 
 C_IDENT = re.compile(r"^_([A-Za-z_][A-Za-z0-9_]*)$")
@@ -41,28 +44,34 @@ OBJC_META = re.compile(r"^_OBJC_METACLASS_\$_([A-Za-z_][A-Za-z0-9_]*)$")
 OBJC_IVAR = re.compile(r"^_OBJC_IVAR_\$_([A-Za-z_][A-Za-z0-9_]*)$")
 OBJC_EHTYPE = re.compile(r"^_OBJC_EHTYPE_\$_([A-Za-z_][A-Za-z0-9_]*)$")
 
+SHIM_NAME = "libMacShim.dylib"
 
-def run(cmd: list[str]) -> str:
-    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+# Must match the -Wl,-reexport_framework list in studio/build.sh.
+REEXPORTS = [
+    "Foundation",
+    "UIKit",
+    "CoreFoundation",
+    "CoreGraphics",
+    "QuartzCore",
+    "CoreText",
+    "ImageIO",
+    "Security",
+    "Metal",
+    "GameController",
+    "UniformTypeIdentifiers",
+    "AudioToolbox",
+]
 
 
 def undefined(path: str) -> set[str]:
-    out = run(["xcrun", "nm", "-u", "-arch", "arm64", path])
+    out = subprocess.run(
+        ["xcrun", "nm", "-u", "-arch", "arm64", path], capture_output=True, text=True
+    ).stdout
     names = set()
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("_") and " " not in line:
             names.add(line)
-    return names
-
-
-def exported(path: str) -> set[str]:
-    out = run(["xcrun", "nm", "-gU", "-arch", "arm64", path])
-    names = set()
-    for line in out.splitlines():
-        fields = line.split()
-        if fields and fields[-1].startswith("_"):
-            names.add(fields[-1])
     return names
 
 
@@ -72,26 +81,37 @@ def sdk_symbols(sdk: str) -> set[str]:
     count = 0
     for root, _dirs, files in os.walk(sdk):
         for name in files:
-            if not name.endswith(".tbd"):
-                continue
-            path = os.path.join(root, name)
-            try:
-                with open(path, "rb") as f:
-                    found.update(m.group(0).decode() for m in SDK_SYMBOL.finditer(f.read()))
-            except OSError:
-                continue
-            count += 1
+            if name.endswith(".tbd"):
+                try:
+                    with open(os.path.join(root, name), "rb") as f:
+                        found.update(m.group(0).decode() for m in SDK_SYMBOL.finditer(f.read()))
+                except OSError:
+                    continue
+                count += 1
     print(f"  read {count} .tbd files from the SDK ({len(found)} symbols)")
+    return found
+
+
+def framework_symbols(sdk: str, names: list[str]) -> set[str]:
+    found: set[str] = set()
+    missing = []
+    for name in names:
+        path = os.path.join(sdk, "System/Library/Frameworks", f"{name}.framework", f"{name}.tbd")
+        if not os.path.exists(path):
+            missing.append(name)
+            continue
+        with open(path, "rb") as f:
+            found.update(m.group(0).decode() for m in SDK_SYMBOL.finditer(f.read()))
+    if missing:
+        print(f"  warning: no .tbd for re-exported {', '.join(missing)}")
+    print(f"  re-exported frameworks provide {len(found)} symbols")
     return found
 
 
 def write_c_stubs(symbols: list[str], path: str) -> tuple[int, int]:
     normal, aliased = [], []
     for sym in symbols:
-        if C_IDENT.match(sym):
-            normal.append(sym)
-        else:
-            aliased.append(sym)
+        (normal if C_IDENT.match(sym) else aliased).append(sym)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("// Generated by tools/plan_shim.py: iOS does not export these, so the shim does.\n")
@@ -108,9 +128,7 @@ def write_c_stubs(symbols: list[str], path: str) -> tuple[int, int]:
             f.write("// Generated by tools/plan_shim.py: symbols whose names are not C identifiers.\n")
             f.write(".text\n")
             for sym in sorted(aliased):
-                safe = re.sub(r"[^A-Za-z0-9_]", "_", sym[1:])
                 f.write(f".globl {sym}\n{sym} = _studpad_stub_asm\n")
-                f.write(f"// {safe}\n")
     elif os.path.exists(asm_path):
         os.remove(asm_path)
     return len(normal), len(aliased)
@@ -149,24 +167,53 @@ def main() -> int:
     ap.add_argument("--report", required=True)
     args = ap.parse_args()
 
-    needed: set[str] = set()
-    needed |= undefined(args.guest)
+    images = [args.guest] + list(args.shipped)
+    shipped_exports: set[str] = set()
     for path in args.shipped:
-        needed |= undefined(path)
-    print(f"  {len(needed)} undefined symbols in the guest and the shipped libraries")
-
-    have: set[str] = set()
-    have |= sdk_symbols(args.sdk)
-    for path in args.shipped:
-        have |= exported(path)
+        shipped_exports |= exports(path)
+    own_exports: set[str] = set()
     for path in args.have_object:
-        have |= exported(path)
+        own_exports |= exports(path)
+    ios_all = sdk_symbols(args.sdk)
+    ios_reexported = framework_symbols(args.sdk, REEXPORTS)
 
-    # An ObjC class definition emits both the class and its metaclass symbol; defining them as
-    # stubs as well would be a duplicate.
-    have |= {f"_OBJC_METACLASS_$_{m.group(1)}" for s in needed if (m := OBJC_CLASS.match(s))}
+    shim_bound: set[str] = set()
+    device_bound: set[str] = set()
+    unattributed = False
+    for path in images:
+        pairs = binds(path)
+        if pairs is None:
+            unattributed = True
+            break
+        for symbol, library in pairs:
+            if os.path.basename(library) == SHIM_NAME:
+                shim_bound.add(symbol)
+            else:
+                device_bound.add(symbol)
+    if unattributed:
+        print("  warning: no dyld_info, attributing every import to the device libraries")
+        device_bound = set()
+        for path in images:
+            device_bound |= undefined(path)
 
-    stubs = sorted(needed - have)
+    print(
+        f"  {len(shim_bound)} symbols are bound to the shim, "
+        f"{len(device_bound)} to iOS libraries"
+    )
+
+    shim_have = own_exports | shipped_exports | ios_reexported
+    stubs_shim = {s for s in shim_bound if s not in shim_have}
+    stubs_device = {s for s in device_bound if s not in ios_all and s not in shim_have}
+
+    # A generated class definition emits both the class and its metaclass symbol, so the
+    # metaclass must not also be stubbed.
+    stubbing = stubs_shim | stubs_device
+    generated = {m.group(1) for s in stubbing if (m := OBJC_CLASS.match(s))}
+    stubs = sorted(
+        s
+        for s in stubbing
+        if not ((m := OBJC_META.match(s)) and m.group(1) in generated)
+    )
     if not stubs:
         raise SystemExit("no missing symbols: has Studio changed shape?")
 
@@ -177,14 +224,20 @@ def main() -> int:
         for sym in stubs:
             f.write(sym + "\n")
     with open(args.report, "w", encoding="utf-8") as f:
-        f.write(f"# shim plan\n\nneeded: {len(needed)}\nhave: {len(needed & have)}\n")
-        f.write(f"stubs: {len(stubs)} ({normal} functions, {aliased} aliased, {classes} ObjC classes)\n\n")
+        f.write("# shim plan\n\n")
+        f.write(f"bound to the shim: {len(shim_bound)}\n")
+        f.write(f"bound to iOS libraries: {len(device_bound)}\n")
+        f.write(f"missing via the shim: {len(stubs_shim)}\n")
+        f.write(f"missing from the iOS SDK: {len(stubs_device)}\n")
+        f.write(f"stubs: {len(stubs)} ({normal} functions, {aliased} aliased, {classes} classes)\n\n")
         for sym in stubs:
             f.write(sym + "\n")
 
-    print(f"  {len(stubs)} symbols are stubbed ({normal} functions, {aliased} aliased, {classes} classes)")
-    preview = ", ".join(s[1:] for s in stubs[:6])
-    print(f"  first: {preview}")
+    print(
+        f"  {len(stubs)} stubs ({normal} functions, {aliased} aliased, {classes} classes): "
+        f"{len(stubs_shim)} the shim must export, {len(stubs_device)} iOS lacks"
+    )
+    print("  first: " + ", ".join(s[1:] for s in stubs[:6]))
     return 0
 
 

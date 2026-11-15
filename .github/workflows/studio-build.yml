@@ -3,6 +3,9 @@ name: studio-build
 # Builds StudPad Studio: the official arm64 macOS Studio, retargeted for iOS, loaded through
 # libMacShim.dylib. The IPA contains Studio and is therefore only ever a private artifact of this
 # job; nothing binary is committed. Text reports are uploaded even when the build fails.
+#
+# Each stage is its own step: a stall then shows up as one running step with everything before it
+# green, and the timings say where the minutes go.
 
 on:
   workflow_dispatch:
@@ -22,6 +25,9 @@ concurrency:
   group: studio-build
   # A newer push replaces an older build; a stuck run must never block the next attempt.
   cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   build:
@@ -43,19 +49,38 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
           xcrun --find dyld_info || xcrun --find dyldinfo || echo "no dyld_info"
 
-      - name: Build
-        env:
-          PYTHONUNBUFFERED: "1"
+      - name: Fetch the official Studio package
         run: |
           set -o pipefail
           chmod +x studio/build.sh recon/fetch_studio.sh
-          studio/build.sh 2>&1 | tee .work-build.log || {
-            status=$?
-            echo "::error title=studio/build.sh exited nonzero::status $status"
-            echo "build failed, last 120 lines:"
-            tail -n 120 .work-build.log
-            exit $status
-          }
+          studio/build.sh fetch 2>&1 | tee -a .work-build.log
+
+      - name: Stage the guest, Qt and the plugins
+        run: studio/build.sh stage 2>&1 | tee -a .work-build.log
+
+      - name: Retarget pass 1
+        run: studio/build.sh retarget1 2>&1 | tee -a .work-build.log
+
+      - name: Compile the shim and plan the stubs
+        run: studio/build.sh plan 2>&1 | tee -a .work-build.log
+
+      - name: Retarget pass 2 (shim binds)
+        run: studio/build.sh retarget2 2>&1 | tee -a .work-build.log
+
+      - name: Link libMacShim.dylib
+        run: studio/build.sh link 2>&1 | tee -a .work-build.log
+
+      - name: Build the host app
+        run: studio/build.sh host 2>&1 | tee -a .work-build.log
+
+      - name: Check the bindings
+        run: studio/build.sh check 2>&1 | tee -a .work-build.log
+
+      - name: Sign
+        run: studio/build.sh sign 2>&1 | tee -a .work-build.log
+
+      - name: Package and verify
+        run: studio/build.sh package 2>&1 | tee -a .work-build.log
 
       - name: Upload build reports
         if: always()

@@ -64,12 +64,16 @@ REEXPORTS = [
 
 
 def undefined(path: str) -> set[str]:
-    out = subprocess.run(
-        ["xcrun", "nm", "-u", "-arch", "arm64", path],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-    ).stdout
+    try:
+        out = subprocess.run(
+            ["xcrun", "nm", "-u", "-arch", "arm64", path],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=600,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"nm timed out on {path}")
     names = set()
     for line in out.splitlines():
         line = line.strip()

@@ -39,9 +39,14 @@ MACOS_FRAMEWORKS = (
 
 
 def run(cmd: list[str]) -> tuple[int, str]:
-    # stdin is explicitly empty: a tool given no file argument (dyld_info) would otherwise read
-    # stdin and block a CI job forever.
-    proc = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    # stdin is explicitly empty and there is a deadline: a tool given no file argument would
+    # otherwise read stdin, and one that gets stuck must fail the stage instead of the job.
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "timeout: " + " ".join(cmd)
     return proc.returncode, proc.stdout + proc.stderr
 
 

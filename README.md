@@ -38,7 +38,9 @@ even when the build fails. Roughly 10–15 minutes on a `macos-15` runner.
    App ID for `com.kuywoh.studpadstudio`, **Add Increased Memory Limit**. Studio is a desktop IDE with
    a 200 MB executable plus Qt; the default per-app limit is the first wall it hits. Reinstall/refresh
    in SideStore afterwards so the new profile is used.
-3. SideStore → My Apps → **+** → `StudPadStudio.ipa`.
+3. SideStore → My Apps → **+** → `StudPadStudio.ipa`. The `StudPadStudio-ipa` Actions artifact is a
+   zip that wraps the IPA — unzip it first. Installing the artifact zip itself fails with
+   "Failed to get bundle ID": the installer finds no `Payload/*.app` inside it.
 4. Optional, and only if the log says `JIT: executable mmap refused`: install
    [StikDebug](https://github.com/StikDebug/StikDebug), pair it, and assign
    `com.kuywoh.studpadstudio` the `universal.js` script once. On iOS 26 only a debugger that an app's

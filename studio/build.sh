@@ -314,13 +314,25 @@ check() {
 
 sign() {
   step "ad-hoc sign, carrying the entitlements the IPA asks for"
-  local binary
+  local entitlements="$ROOT/app/entitlements-sideload.plist" binary
   for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/"*.dylib "$APP/"*.dylib \
     "$APP/Frameworks/PlugIns/"*/*.dylib; do
     [ -f "$binary" ] || continue
     guard 300 codesign -f -s - "$binary" 2>/dev/null || echo "  ad-hoc sign failed: $binary"
   done
-  guard 900 codesign -f -s - --entitlements "$ROOT/app/entitlements-sideload.plist" "$APP"
+
+  # The entitlements that matter (get-task-allow for StikDebug, increased-memory-limit for
+  # GetMoreRam) are read by SideStore from the main executable's signature. Signing the *bundle* here
+  # is not needed and it fails while validating Studio's copied resources as nested code, so the
+  # executable is what gets the entitlements and the bundle signature is best effort.
+  guard 300 codesign -f -s - --entitlements "$entitlements" "$APP/StudPadStudio"
+  codesign -d --entitlements - "$APP/StudPadStudio" 2>/dev/null | grep -q get-task-allow || {
+    echo "ERROR: the main executable's signature does not carry get-task-allow" >&2
+    return 1
+  }
+  guard 900 codesign -f -s - --entitlements "$entitlements" "$APP" 2>/dev/null ||
+    echo "  bundle signature skipped (SideStore re-signs the bundle)"
+  return 0
 }
 
 package() {

@@ -213,6 +213,7 @@ def main() -> int:
 
     shim_bound: set[str] = set()
     device_bound: set[str] = set()
+    device_libraries: dict[str, set[str]] = {}
     attributed = True
     for path in images:
         pairs = binds(path)
@@ -224,6 +225,7 @@ def main() -> int:
                 shim_bound.add(symbol)
             else:
                 device_bound.add(symbol)
+                device_libraries.setdefault(symbol, set()).add(library)
 
     if not attributed:
         # The fallback cannot tell a Qt-to-Qt import from an AppKit one, and rerouting those would
@@ -268,7 +270,9 @@ def main() -> int:
     # A library is absorbed when it has at least one symbol iOS does not export. Rerouting single
     # symbols is not possible: a bind stream may set one dylib ordinal for a whole run of symbols, so
     # rewriting it would silently move symbols that do exist (malloc, free, cos) onto the shim.
-    absorb_libraries = sorted({library for symbol, library in device_bound if symbol in stubs_device})
+    absorb_libraries = sorted(
+        {library for symbol in stubs_device for library in device_libraries.get(symbol, ())}
+    )
     if args.absorb_out:
         with open(args.absorb_out, "w", encoding="utf-8") as f:
             f.write("# libraries whose imports must be absorbed by libMacShim.dylib\n")

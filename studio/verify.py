@@ -133,6 +133,8 @@ def main():
     plist = plistlib.loads(z.read(f"{ROOT}/Info.plist"))
     if plist.get("CFBundleExecutable") != "StudPadStudio":
         fail(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}")
+    if not plist.get("CFBundleIdentifier"):
+        fail("no CFBundleIdentifier: the iOS installer refuses the bundle with 'Missing bundle ID'")
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off: the log would not be readable")
     if "UIApplicationSceneManifest" not in plist:

@@ -25,6 +25,61 @@ LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_LOAD_UPWARD_DYLIB = 0x80000023
 DYLIB_CMDS = {LC_LOAD_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_WEAK_DYLIB, LC_LOAD_UPWARD_DYLIB}
 SDK_SYMBOL = re.compile(rb"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
+SDK_SYMBOL_TEXT = re.compile(r"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
+
+
+def _unquote(text: str) -> str:
+    return text.strip().strip("'\"")
+
+
+def _add_tbd_value(section: str, value: str, found: set[str]) -> None:
+    value = _unquote(value)
+    if not value or value.startswith("["):
+        return
+    if section == "objc-classes":
+        found.add(value if value.startswith("_OBJC_CLASS_$_") else "_OBJC_CLASS_$_" + value)
+    elif section == "objc-ivars":
+        found.add(value if value.startswith("_OBJC_IVAR_$_") else "_OBJC_IVAR_$_" + value)
+    elif section == "objc-eh-types":
+        found.add(value if value.startswith("_OBJC_EHTYPE_$_") else "_OBJC_EHTYPE_$_" + value)
+    elif section.endswith("symbols"):
+        found.add(value if value.startswith("_") else "_" + value)
+
+
+def tbd_symbols(text: str) -> set[str]:
+    """Every symbol a .tbd exports, in both of the shapes the file uses.
+
+    Plain symbols are inline lists that wrap over many lines, so they are found with a token scan.
+    objc-classes / objc-ivars / objc-eh-types hold bare names (NSAlert, NSView._frame), which the
+    linker turns into `_OBJC_CLASS_$_NSAlert` and friends; those need the section parser.
+    """
+    found: set[str] = set(SDK_SYMBOL_TEXT.findall(text))
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            item = stripped[2:].strip()
+            if re.match(r"^[a-z-]+:\s", item) or item.endswith(":"):
+                section = None
+                continue
+            if section:
+                _add_tbd_value(section, item, found)
+            continue
+        key, sep, rest = stripped.partition(":")
+        if not sep:
+            continue
+        key, rest = key.strip(), rest.strip()
+        if rest.startswith("[") and rest.endswith("]"):
+            section = None
+            for item in rest[1:-1].split(","):
+                _add_tbd_value(key, item.strip(), found)
+        elif rest:
+            section = None
+        else:
+            section = key
+    return found
 
 MACOS_FRAMEWORKS = (
     "/System/Library/Frameworks/AppKit.framework",
@@ -291,8 +346,8 @@ def reexported_symbols(shim: str, sdk: str) -> set[str]:
         if not tbd:
             print(f"  warning: no .tbd for re-exported {library}")
             continue
-        with open(tbd, "rb") as f:
-            found.update(m.group(0).decode() for m in SDK_SYMBOL.finditer(f.read()))
+        with open(tbd, "r", encoding="utf-8", errors="replace") as f:
+            found |= tbd_symbols(f.read())
     return found
 
 

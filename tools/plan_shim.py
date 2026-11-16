@@ -41,9 +41,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_binds import binds, exports  # noqa: E402  (same tool directory)
-
-SDK_SYMBOL = re.compile(r"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
+from check_binds import binds, exports, tbd_symbols  # noqa: E402  (same tool directory)
 
 # Clang refuses to redeclare these, and they are compiler builtins no image should bind by name.
 SKIP_STUBS = re.compile(r"^__(atomic|builtin)")
@@ -94,63 +92,6 @@ def sdk_symbols(sdk: str) -> set[str]:
                 continue
             count += 1
     print(f"  read {count} .tbd files from the SDK ({len(found)} symbols)")
-    return found
-
-
-def _unquote(text: str) -> str:
-    return text.strip().strip("'\"")
-
-
-def _add_tbd_value(section: str, value: str, found: set[str]) -> None:
-    value = _unquote(value)
-    if not value or value.startswith("["):
-        return
-    if section == "objc-classes":
-        found.add(value if value.startswith("_OBJC_CLASS_$_") else "_OBJC_CLASS_$_" + value)
-    elif section == "objc-ivars":
-        found.add(value if value.startswith("_OBJC_IVAR_$_") else "_OBJC_IVAR_$_" + value)
-    elif section == "objc-eh-types":
-        found.add(value if value.startswith("_OBJC_EHTYPE_$_") else "_OBJC_EHTYPE_$_" + value)
-    elif section.endswith("symbols"):
-        found.add(value if value.startswith("_") else "_" + value)
-
-
-def tbd_symbols(text: str) -> set[str]:
-    # Two passes, because a .tbd writes the two kinds of export differently:
-    #
-    #   * plain symbols are inline lists that wrap over many lines, so a token scan is the reliable
-    #     way to see all of them;
-    #   * objc-classes / objc-ivars / objc-eh-types hold bare names (NSAlert, NSView._frame) with no
-    #     leading underscore at all, so those need the section parser below to become real import
-    #     names (_OBJC_CLASS_$_NSAlert, ...).
-    found: set[str] = set(SDK_SYMBOL.findall(text))
-    section = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("- "):
-            item = stripped[2:].strip()
-            # A new mapping entry inside a list (`- targets: [...]`) ends the current section.
-            if re.match(r"^[a-z-]+:\s", item) or item.endswith(":"):
-                section = None
-                continue
-            if section:
-                _add_tbd_value(section, item, found)
-            continue
-        key, sep, rest = stripped.partition(":")
-        if not sep:
-            continue
-        key = key.strip()
-        rest = rest.strip()
-        if rest.startswith("[") and rest.endswith("]"):
-            section = None
-            for item in rest[1:-1].split(","):
-                _add_tbd_value(key, item.strip(), found)
-        elif rest:
-            section = None
-        else:
-            section = key
     return found
 
 
@@ -299,7 +240,13 @@ def main() -> int:
     stubs_shim = {s for s in shim_bound if s not in shim_have}
     stubs_device = {s for s in device_bound if s not in ios_all and s not in shim_have}
 
-    stubbing = stubs_shim | stubs_device
+    # NSObject and NSProxy come from libobjc and are present on every iOS process. Never reroute
+    # them: a reroute would make them the shim's problem, and no stub can be the real class.
+    def never_stub(sym: str) -> bool:
+        m = OBJC_CLASS.match(sym) or OBJC_META.match(sym)
+        return bool(m) and m.group(1) in NEVER_STUB_CLASSES
+
+    stubbing = {s for s in (stubs_shim | stubs_device) if not never_stub(s)}
     generated = {m.group(1) for s in stubbing if (m := OBJC_CLASS.match(s))}
     stubs = sorted(
         s

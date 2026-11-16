@@ -123,12 +123,23 @@ static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *pat
     (void)receiver;
     (void)command;
     if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
-    NSData *data = [NSData dataWithContentsOfFile:path];
+    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault,
+        (__bridge CFStringRef)path, kCFURLPOSIXPathStyle, false);
+    if (!url) return nil;
+    CFDataRef data = CFDataCreateWithContentsOfURL(kCFAllocatorDefault, url);
+    CFRelease(url);
     if (!data) return nil;
-    id value = [NSPropertyListSerialization propertyListWithData:data
-        options:NSPropertyListImmutable format:NULL error:NULL];
-    if (!value || CFGetTypeID((__bridge CFTypeRef)value) != CFDictionaryGetTypeID()) return nil;
-    return value;
+    CFErrorRef error = NULL;
+    CFPropertyListRef value = CFPropertyListCreateWithData(
+        kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
+    if (error) CFRelease(error);
+    if (!value) return nil;
+    if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {
+        CFRelease(value);
+        return nil;
+    }
+    return CFBridgingRelease(value);
 }
 
 static void ms_install_dictionary_file_reader(void) {
@@ -155,7 +166,19 @@ static void ms_install_dictionary_file_reader(void) {
 }
 
 + (BOOL)resolveInstanceMethod:(SEL)sel { return [self ms_claim:sel isClass:NO]; }
-+ (BOOL)resolveClassMethod:(SEL)sel { return [self ms_claim:sel isClass:YES]; }
++ (BOOL)resolveClassMethod:(SEL)sel {
+    if (strcmp(class_getName(self), "NSDictionary") == 0 &&
+        sel_isEqual(sel, sel_registerName("dictionaryWithContentsOfFile:"))) {
+        Class metaclass = object_getClass(self);
+        if (class_addMethod(metaclass, sel, (IMP)ms_dictionary_contents_of_file, "@@:@")) {
+            studpad_log("[shim] resolved NSDictionary dictionaryWithContentsOfFile:");
+            return YES;
+        }
+        if (class_getClassMethod(self, sel)) return YES;
+        studpad_log("[shim] could not resolve NSDictionary dictionaryWithContentsOfFile:");
+    }
+    return [self ms_claim:sel isClass:YES];
+}
 
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
     (void)sel;

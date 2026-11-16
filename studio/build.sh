@@ -333,7 +333,7 @@ sign() {
   mv "$WORK/StudPadStudio.sign" "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
   local signed_entitlements="$WORK/signed-entitlements.plist"
-  codesign -d --entitlements - "$APP/StudPadStudio" >"$signed_entitlements" 2>/dev/null || {
+  codesign -d --entitlements :- "$APP/StudPadStudio" >"$signed_entitlements" 2>/dev/null || {
     echo "ERROR: could not read the main executable's signed entitlements" >&2
     return 1
   }

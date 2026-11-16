@@ -43,7 +43,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_binds import binds, exports  # noqa: E402  (same tool directory)
 
-SDK_SYMBOL = re.compile(r"_?[A-Za-z0-9_$][A-Za-z0-9_$.]*")
+SDK_SYMBOL = re.compile(r"_[A-Za-z0-9_$][A-Za-z0-9_$.]*")
+
+# Clang refuses to redeclare these, and they are compiler builtins no image should bind by name.
+SKIP_STUBS = re.compile(r"^__(atomic|builtin)")
+
+# Clang builtins that are harmless to shadow still warn; not worth special-casing.
 
 C_IDENT = re.compile(r"^_([A-Za-z_][A-Za-z0-9_]*)$")
 OBJC_CLASS = re.compile(r"^_OBJC_CLASS_\$_([A-Za-z_][A-Za-z0-9_]*)$")
@@ -75,12 +80,7 @@ NEVER_STUB_CLASSES = {"NSObject", "NSProxy", "MSStubObject"}
 
 
 def sdk_symbols(sdk: str) -> set[str]:
-    """Every external symbol name the iOS SDK's text-based stubs export.
-
-    Line based on purpose: the YAML is regular enough that a real parser is not needed, and the
-    alternative (scanning for `_...` tokens) misses `objc-classes:`/`objc-ivars:` entries, which are
-    written as bare class names.
-    """
+    """Every external symbol name the iOS SDK's text-based stubs export."""
     found: set[str] = set()
     count = 0
     for root, _dirs, files in os.walk(sdk):
@@ -116,7 +116,14 @@ def _add_tbd_value(section: str, value: str, found: set[str]) -> None:
 
 
 def tbd_symbols(text: str) -> set[str]:
-    found: set[str] = set()
+    # Two passes, because a .tbd writes the two kinds of export differently:
+    #
+    #   * plain symbols are inline lists that wrap over many lines, so a token scan is the reliable
+    #     way to see all of them;
+    #   * objc-classes / objc-ivars / objc-eh-types hold bare names (NSAlert, NSView._frame) with no
+    #     leading underscore at all, so those need the section parser below to become real import
+    #     names (_OBJC_CLASS_$_NSAlert, ...).
+    found: set[str] = set(SDK_SYMBOL.findall(text))
     section = None
     for line in text.splitlines():
         stripped = line.strip()
@@ -172,9 +179,9 @@ def classify(symbols: list[str]) -> dict[str, list[str]]:
             groups["ivars"].append(sym)
         elif OBJC_EHTYPE.match(sym):
             groups["ehtypes"].append(sym)
-        elif C_IDENT.match(sym):
+        elif C_IDENT.match(sym) and not SKIP_STUBS.match(sym):
             groups["functions"].append(sym)
-        elif not OBJC_META.match(sym):
+        elif not OBJC_META.match(sym) and not SKIP_STUBS.match(sym):
             groups["asm"].append(sym)
     return groups
 
@@ -292,6 +299,7 @@ def main() -> int:
         for s in stubbing
         if not ((m := OBJC_META.match(s)) and m.group(1) in generated)
         if not (m := OBJC_CLASS.match(s)) or m.group(1) not in NEVER_STUB_CLASSES
+        if not SKIP_STUBS.match(s)
     )
     if not stubs:
         raise SystemExit("no missing symbols: has Studio changed shape?")

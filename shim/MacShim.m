@@ -307,6 +307,7 @@ static void ms_pump(double seconds) {
 @private
     CALayer *_msHostedLayer;
 }
+- (void)ms_layoutHostedLayer;
 @end
 
 @implementation NSView
@@ -333,6 +334,7 @@ static void ms_pump(double seconds) {
     CGRect frame = self.frame;
     frame.size = size;
     self.frame = frame;
+    [self ms_layoutHostedLayer];
 }
 - (void)setFrameOrigin:(CGPoint)origin {
     CGRect frame = self.frame;
@@ -342,7 +344,10 @@ static void ms_pump(double seconds) {
 - (CGRect)visibleRect { return self.bounds; }
 - (BOOL)isFlipped { return YES; }
 - (void)setFlipped:(BOOL)flipped { (void)flipped; }
-- (void)setBounds:(CGRect)bounds { (void)bounds; }
+- (void)setBounds:(CGRect)bounds {
+    [super setBounds:bounds];
+    [self ms_layoutHostedLayer];
+}
 - (void)setNeedsDisplay:(BOOL)needs {
     if (needs) [self setNeedsDisplay];
 }
@@ -386,7 +391,6 @@ static void ms_pump(double seconds) {
         [self->_msHostedLayer removeFromSuperlayer];
         self->_msHostedLayer = next;
         if (next) {
-            next.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
             [self.layer addSublayer:next];
             [self ms_layoutHostedLayer];
             studpad_log("[shim] hosted AppKit layer %s in UIKit view",

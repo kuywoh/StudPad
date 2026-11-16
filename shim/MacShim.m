@@ -1157,6 +1157,14 @@ NSApplication *NSApp = nil;
     NSApp = [NSApplication sharedApplication];
 }
 
+// Core Data asks class objects whether a selector should be eagerly registered.
+// NSApplication has no Core Data generated accessors, so answer with the private
+// hook's actual BOOL/const-char-pointer ABI instead of the void miss fallback.
++ (BOOL)_classShouldAlwaysRegisterSelectorNamed:(const char *)name {
+    (void)name;
+    return NO;
+}
+
 - (id)ms_lastWindow {
     @synchronized(gWindows) {
         for (NSWindow *window in gWindows.reverseObjectEnumerator) {

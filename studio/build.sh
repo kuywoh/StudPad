@@ -315,6 +315,10 @@ check() {
 sign() {
   step "ad-hoc sign, carrying the entitlements the IPA asks for"
   local entitlements="$ROOT/app/entitlements-sideload.plist" binary
+  # codesign's messages name paths that do not match what was passed, so record the shape first.
+  ls -ld "$APP" "$APP/StudPadStudio" "$APP/qt.conf" || true
+  file "$APP/StudPadStudio" "$APP/qt.conf" || true
+  stat -f 'exec type=%HT mode=%Sp size=%z' "$APP/StudPadStudio" || true
   for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/"*.dylib "$APP/"*.dylib \
     "$APP/Frameworks/PlugIns/"*/*.dylib; do
     [ -f "$binary" ] || continue

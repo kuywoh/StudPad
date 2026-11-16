@@ -94,6 +94,19 @@ def tbd_symbols(text: str) -> set[str]:
         i += 1
     return found
 
+ALLOCATOR_SYMBOLS = {
+    "_malloc", "_free", "_calloc", "_realloc", "_reallocf", "_posix_memalign",
+    "_aligned_alloc", "_valloc", "_malloc_size", "_malloc_good_size",
+    "_mi_malloc", "_mi_free", "_mi_calloc", "_mi_realloc",
+}
+
+
+def is_allocator_symbol(symbol: str) -> bool:
+    return symbol in ALLOCATOR_SYMBOLS or symbol.startswith(
+        ("_malloc_zone_", "_mi_", "__Zn", "__Zd", "_Zn", "_Zd")
+    )
+
+
 MACOS_FRAMEWORKS = (
     "/System/Library/Frameworks/AppKit.framework",
     "/System/Library/Frameworks/Cocoa.framework",
@@ -524,6 +537,11 @@ def main() -> int:
             unreadable += 1
             continue
         for symbol, library in pairs:
+            if is_allocator_symbol(symbol):
+                print(
+                    f"  allocator binding: {os.path.relpath(path, args.app)}: "
+                    f"{symbol} -> {library}"
+                )
             if os.path.basename(library) == "libMacShim.dylib":
                 want.setdefault(symbol, []).append(os.path.relpath(path, args.app))
             elif library.startswith(MACOS_FRAMEWORKS):

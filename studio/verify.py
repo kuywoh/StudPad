@@ -80,6 +80,14 @@ def inspect(data):
     return dict(filetype=filetype, platform=platform, has_main=has_main, id=install_id, loads=loads)
 
 
+def validate_bundle_version(plist, expected=None):
+    version = plist.get("CFBundleVersion")
+    if not isinstance(version, str) or not version.strip():
+        fail("no CFBundleVersion: the installed app cannot identify its build")
+    if expected and version != expected:
+        fail(f"CFBundleVersion is {version!r}, expected workflow run {expected!r}")
+
+
 def main():
     if len(sys.argv) != 2:
         fail("usage: verify.py <ipa>")
@@ -138,6 +146,7 @@ def main():
         fail(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}")
     if plist.get("CFBundleIdentifier") != "com.kuywoh.studpadstudio":
         fail(f"unexpected CFBundleIdentifier: {plist.get('CFBundleIdentifier')!r}")
+    validate_bundle_version(plist, os.environ.get("GITHUB_RUN_NUMBER"))
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off: the log would not be readable")
     if "UIApplicationSceneManifest" not in plist:

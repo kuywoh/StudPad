@@ -2,7 +2,17 @@
 
 import unittest
 
-from tools.check_binds import tbd_symbols
+from tools.check_binds import is_allocator_symbol, tbd_symbols
+
+
+class AllocatorBindingTests(unittest.TestCase):
+    def test_c_and_cpp_allocator_imports_are_reported(self):
+        for symbol in ("_malloc", "_free", "_realloc", "__Znwm", "__ZdlPv", "_mi_malloc"):
+            with self.subTest(symbol=symbol):
+                self.assertTrue(is_allocator_symbol(symbol))
+
+    def test_non_allocator_cpp_symbols_are_not_reported(self):
+        self.assertFalse(is_allocator_symbol("_ZN12QKeySequenceD1Ev"))
 
 
 class TBDExportTests(unittest.TestCase):

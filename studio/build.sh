@@ -300,7 +300,8 @@ host() {
   plutil -replace DTPlatformVersion -string "$SDK_VER" "$APP/Info.plist"
   plutil -replace DTSDKName -string "$SDK_NAME" "$APP/Info.plist"
   plutil -replace MinimumOSVersion -string "$IOS_MIN" "$APP/Info.plist"
-  local src version
+  local build_number="${GITHUB_RUN_NUMBER:-0}" src version
+  plutil -replace CFBundleVersion -string "$build_number" "$APP/Info.plist"
   src="$(package_app)"
   version="$(plutil -extract CFBundleShortVersionString raw "$src/Contents/Info.plist" 2>/dev/null || true)"
   [ -n "$version" ] && plutil -replace CFBundleShortVersionString -string "$version" "$APP/Info.plist"

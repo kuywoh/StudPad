@@ -49,7 +49,7 @@ jobs:
           .work/test_input_bridge
           cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -pthread -Iapp app/sha256_file.c tools/test_sha256_file.c -o .work/test_sha256_file
           .work/test_sha256_file
-          python3 -m unittest tools.test_sideload_entitlements tools.test_studio_manifest tools.test_zip_resources tools.test_plan_shim tools.test_check_binds tools.test_ios_retarget
+          python3 -m unittest tools.test_sideload_entitlements tools.test_studio_manifest tools.test_zip_resources tools.test_plan_shim tools.test_check_binds tools.test_ios_retarget tools.test_studio_verify
           python3 studio/validate_entitlements.py app/entitlements-sideload.plist
 
       - name: Select an iOS 26 SDK Xcode

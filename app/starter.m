@@ -617,7 +617,8 @@ static void crash_signal(int sig) {
         didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)launchOptions {
     (void)application;
     (void)launchOptions;
-    studpad_log("StudPad build 48 launched");
+    NSString *build = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"];
+    studpad_log("StudPad build %s launched", build.UTF8String ?: "unknown");
     return YES;
 }
 @end

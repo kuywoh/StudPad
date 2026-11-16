@@ -71,8 +71,10 @@ allocator: malloc(64) -> mimalloc heap …       # libsystem_malloc here means Q
 guest home: /var/mobile/Containers/Data/…/    # Studio's ~; the line below says what it used to be
 dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
 calling Studio main
+[shim] NSColor extended: … palette method(s)  # AppKit's colour palette, answered over UIKit
 [shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window
 [stub] … / [miss] -[NSView …]                 # the next API to implement
+[miss] +[NSColor …]                           # an AppKit class method nobody implements yet
 ```
 
 The setup screen reports memory entitlement and debugger state. Touch, keyboard and rendering still

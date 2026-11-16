@@ -8,7 +8,8 @@
 //   MSStubObject     root class for the generated AppKit/Carbon classes: an unknown selector on any
 //                    of them logs and returns 0 instead of raising
 //   AppKit slice     NSApplication, NSWindow, NSView, NSEvent, NSScreen, NSMenu, NSMenuItem,
-//                    NSGraphicsContext over UIKit; logged NSOpenGL stubs
+//                    NSGraphicsContext over UIKit; logged NSOpenGL stubs; AppKit's NSColor
+//                    palette and colour conversion answered over UIKit's semantic colours
 //   re-exports       Foundation, UIKit, CoreFoundation, CoreGraphics, QuartzCore, CoreText,
 //                    Security, Metal, GameController, UniformTypeIdentifiers, AudioToolbox
 //
@@ -227,10 +228,13 @@ static void ms_install_foundation_file_readers(void) {
         (IMP)ms_url_with_string, "NSURL");
 }
 
+static void ms_install_appkit_colors(void);
+
 @implementation MSStubObject
 
 + (void)load {
     ms_install_foundation_file_readers();
+    ms_install_appkit_colors();
 }
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
@@ -279,6 +283,285 @@ static void ms_install_foundation_file_readers(void) {
 }
 
 @end
+
+// ---------------------------------------------------------------------------------------------
+// NSColor: AppKit's palette over UIKit
+// ---------------------------------------------------------------------------------------------
+//
+// Qt's cocoa plugin builds its QPalette from AppKit's NSColor statics and converts each colour with
+// -type, -colorSpace, -colorUsingColorSpace: and -getRed:green:blue:alpha: (qt_mac_toQColor in
+// Qt 6.4's src/gui/painting/qcoregraphics.mm). iOS has a real NSColor class but neither the AppKit
+// palette nor the whole conversion surface, so Qt's first palette lookup raised
+// +[NSColor controlTextColor] and took Studio down while QApplication was being constructed.
+// Add what the class does not already answer, backed by UIKit's semantic colours; leave the rest.
+
+@interface MSColor : MSStubObject
+- (instancetype)initWithColor:(UIColor *)color;
+@property (nonatomic, strong) UIColor *color;
+@end
+
+static id ms_nil_imp(id self, SEL _cmd) { (void)self; (void)_cmd; return nil; }
+
+static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
+
+@implementation MSColor
+
+- (instancetype)initWithColor:(UIColor *)color {
+    if ((self = [super init])) _color = color;
+    return self;
+}
+
+// Catalog sends Qt down the generic conversion path below. Its componentBased branch compares
+// against NSColorSpace singletons this shim cannot reproduce, so it must not be taken.
+- (NSInteger)type { return 2; }
+- (NSString *)className { return @"NSColor"; }
+- (NSString *)catalogNameComponent { return @"Shim"; }
+- (NSString *)colorNameComponent { return @"shim"; }
+- (id)colorSpace { return nil; }
+- (NSInteger)numberOfComponents { return 4; }
+- (id)colorUsingColorSpace:(id)space { (void)space; return self; }
+- (id)colorUsingColorSpaceName:(id)name { (void)name; return self; }
+- (id)highlightWithLevel:(CGFloat)level { (void)level; return self; }
+- (id)colorWithAlphaComponent:(CGFloat)alpha {
+    return [[MSColor alloc] initWithColor:[_color colorWithAlphaComponent:alpha]];
+}
+- (CGColorRef)CGColor { return _color.CGColor; }
+
+- (BOOL)getRed:(CGFloat *)red green:(CGFloat *)green blue:(CGFloat *)blue alpha:(CGFloat *)alpha {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (![_color getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat white = 0;
+        if ([_color getWhite:&white alpha:&a]) r = g = b = white;
+    }
+    if (red) *red = r;
+    if (green) *green = g;
+    if (blue) *blue = b;
+    if (alpha) *alpha = a;
+    return YES;
+}
+
+- (void)getComponents:(CGFloat *)components {
+    if (!components) return;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    [self getRed:&r green:&g blue:&b alpha:&a];
+    components[0] = r;
+    components[1] = g;
+    components[2] = b;
+    components[3] = a;
+}
+
+@end
+
+// Conversion for colours the system vends itself ([NSColor windowBackgroundColor] and friends may
+// already exist): read them through CGColor so any UIKit/AppKit colour object works.
+static BOOL ms_generic_get_rgba(id self, SEL _cmd, CGFloat *red, CGFloat *green, CGFloat *blue,
+                                CGFloat *alpha) {
+    (void)_cmd;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if ([(id)self respondsToSelector:@selector(CGColor)]) {
+        CGColorRef cg = [(MSColor *)self CGColor];
+        CGColorSpaceRef space = cg ? CGColorGetColorSpace(cg) : NULL;
+        const CGFloat *components = cg ? CGColorGetComponents(cg) : NULL;
+        size_t count = cg ? CGColorGetNumberOfComponents(cg) : 0;
+        if (components && count) {
+            CGColorSpaceModel model = space ? CGColorSpaceGetModel(space) : kCGColorSpaceModelUnknown;
+            if (model == kCGColorSpaceModelMonochrome && count >= 2) {
+                r = g = b = components[0];
+                a = components[1];
+            } else if (count >= 4) {
+                r = components[0];
+                g = components[1];
+                b = components[2];
+                a = components[3];
+            } else if (count == 3) {
+                r = components[0];
+                g = components[1];
+                b = components[2];
+            }
+        }
+    }
+    if (red) *red = r;
+    if (green) *green = g;
+    if (blue) *blue = b;
+    if (alpha) *alpha = a;
+    return YES;
+}
+
+static void ms_generic_get_components(id self, SEL _cmd, CGFloat *components) {
+    if (!components) return;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    ms_generic_get_rgba(self, _cmd, &r, &g, &b, &a);
+    components[0] = r;
+    components[1] = g;
+    components[2] = b;
+    components[3] = a;
+}
+
+static NSString *ms_nscolor_class_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"NSColor";
+}
+
+static NSString *ms_nscolor_catalog_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"Shim";
+}
+
+static NSString *ms_nscolor_color_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"shim";
+}
+
+static NSInteger ms_nscolor_type(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return 2;
+}
+
+static NSInteger ms_nscolor_component_count(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return 4;
+}
+
+static id ms_nscolor_no_color_space(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return nil;
+}
+
+static NSDictionary<NSString *, UIColor *> *gAppKitColors = nil;
+
+static id ms_nscolor_static_color(id self, SEL _cmd) {
+    (void)self;
+    UIColor *color = gAppKitColors[@(sel_getName(_cmd))];
+    return color ? [[MSColor alloc] initWithColor:color] : nil;
+}
+
+static id ms_nscolor_alternating_backgrounds(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @[ [[MSColor alloc] initWithColor:UIColor.systemBackgroundColor],
+              [[MSColor alloc] initWithColor:UIColor.secondarySystemBackgroundColor] ];
+}
+
+// Answer an unimplemented method instead of letting the runtime raise, so the log names the next
+// AppKit API Studio needs rather than the process dying in QApplication's constructor.
+static BOOL ms_nscolor_claim(id self, SEL _cmd, SEL sel, BOOL isClass) {
+    (void)_cmd;
+    Class cls = (Class)self;
+    studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(cls), sel_getName(sel));
+    Class target = isClass ? object_getClass(cls) : cls;
+    if (class_getInstanceMethod(target, sel)) return NO;
+    return class_addMethod(target, sel, (IMP)ms_nil_imp, "@@:");
+}
+
+static BOOL ms_nscolor_resolve_class(id self, SEL _cmd, SEL sel) {
+    return ms_nscolor_claim(self, _cmd, sel, YES);
+}
+
+static BOOL ms_nscolor_resolve_instance(id self, SEL _cmd, SEL sel) {
+    return ms_nscolor_claim(self, _cmd, sel, NO);
+}
+
+static BOOL ms_add_class_method(Class cls, const char *name, IMP implementation, const char *types) {
+    SEL selector = sel_registerName(name);
+    if (class_getClassMethod(cls, selector)) return NO;
+    return class_addMethod(object_getClass(cls), selector, implementation, types);
+}
+
+static BOOL ms_add_instance_method(Class cls, const char *name, IMP implementation,
+                                   const char *types) {
+    SEL selector = sel_registerName(name);
+    if (class_getInstanceMethod(cls, selector)) return NO;
+    return class_addMethod(cls, selector, implementation, types);
+}
+
+static void ms_install_appkit_colors(void) {
+    struct { const char *selector; UIColor *color; } palette[] = {
+        {"windowBackgroundColor", UIColor.systemBackgroundColor},
+        {"controlBackgroundColor", UIColor.secondarySystemBackgroundColor},
+        {"textBackgroundColor", UIColor.systemBackgroundColor},
+        {"controlColor", UIColor.tertiarySystemBackgroundColor},
+        {"selectedControlColor", UIColor.systemBlueColor},
+        {"selectedContentBackgroundColor", UIColor.systemBlueColor},
+        {"unemphasizedSelectedContentBackgroundColor", UIColor.systemGray4Color},
+        {"controlTextColor", UIColor.labelColor},
+        {"textColor", UIColor.labelColor},
+        {"labelColor", UIColor.labelColor},
+        {"headerTextColor", UIColor.labelColor},
+        {"secondaryLabelColor", UIColor.secondaryLabelColor},
+        {"quaternaryLabelColor", UIColor.quaternaryLabelColor},
+        {"disabledControlTextColor", UIColor.tertiaryLabelColor},
+        {"placeholderTextColor", UIColor.placeholderTextColor},
+        {"shadowColor", UIColor.blackColor},
+        {"linkColor", UIColor.linkColor},
+        {"selectedMenuItemTextColor", UIColor.whiteColor},
+        {"alternateSelectedControlTextColor", UIColor.whiteColor},
+        {"unemphasizedSelectedTextColor", UIColor.secondaryLabelColor},
+        {"controlAccentColor", UIColor.systemBlueColor},
+        {"keyboardFocusIndicatorColor", UIColor.systemBlueColor},
+        {"gridColor", UIColor.separatorColor},
+        {"separatorColor", UIColor.separatorColor},
+    };
+
+    Class cls = objc_getClass("NSColor");
+    BOOL created = NO;
+    if (!cls) {
+        cls = objc_allocateClassPair([MSStubObject class], "NSColor", 0);
+        if (!cls) {
+            studpad_log("[shim] no NSColor class and could not create one");
+            return;
+        }
+        objc_registerClassPair(cls);
+        created = YES;
+    }
+
+    NSMutableDictionary *colors = [NSMutableDictionary dictionary];
+    int added = 0;
+    for (size_t i = 0; i < sizeof palette / sizeof palette[0]; i++) {
+        colors[@(palette[i].selector)] = palette[i].color;
+        if (ms_add_class_method(cls, palette[i].selector,
+                                (IMP)ms_nscolor_static_color, "@@:"))
+            added++;
+    }
+    gAppKitColors = [colors copy];
+    if (ms_add_class_method(cls, "alternatingContentBackgroundColors",
+                            (IMP)ms_nscolor_alternating_backgrounds, "@@:"))
+        added++;
+
+    int conversions = 0;
+    conversions += ms_add_instance_method(cls, "type", (IMP)ms_nscolor_type, "q@:");
+    conversions += ms_add_instance_method(cls, "className", (IMP)ms_nscolor_class_name, "@@:");
+    conversions += ms_add_instance_method(cls, "catalogNameComponent",
+                                          (IMP)ms_nscolor_catalog_name, "@@:");
+    conversions += ms_add_instance_method(cls, "colorNameComponent",
+                                          (IMP)ms_nscolor_color_name, "@@:");
+    conversions += ms_add_instance_method(cls, "colorSpace", (IMP)ms_nscolor_no_color_space, "@@:");
+    conversions += ms_add_instance_method(cls, "numberOfComponents",
+                                          (IMP)ms_nscolor_component_count, "q@:");
+    conversions += ms_add_instance_method(cls, "colorUsingColorSpace:", (IMP)ms_return_self, "@@:@");
+    conversions += ms_add_instance_method(cls, "colorUsingColorSpaceName:",
+                                          (IMP)ms_return_self, "@@:@");
+    conversions += ms_add_instance_method(cls, "highlightWithLevel:", (IMP)ms_return_self, "@@:d");
+    conversions += ms_add_instance_method(cls, "colorWithAlphaComponent:",
+                                          (IMP)ms_return_self, "@@:d");
+    conversions += ms_add_instance_method(cls, "getRed:green:blue:alpha:",
+                                          (IMP)ms_generic_get_rgba, "B@:^d^d^d^d");
+    conversions += ms_add_instance_method(cls, "getComponents:",
+                                          (IMP)ms_generic_get_components, "v@:^d");
+
+    class_addMethod(object_getClass(cls), sel_registerName("resolveClassMethod:"),
+                    (IMP)ms_nscolor_resolve_class, "B@::");
+    class_addMethod(object_getClass(cls), sel_registerName("resolveInstanceMethod:"),
+                    (IMP)ms_nscolor_resolve_instance, "B@::");
+
+    studpad_log("[shim] NSColor %s: %d palette method(s), %d conversion method(s)",
+                created ? "created" : "extended", added, conversions);
+}
 
 static void ms_pump(double seconds) {
     NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];

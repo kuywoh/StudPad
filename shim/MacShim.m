@@ -530,7 +530,8 @@ static unsigned short ms_mac_keycode(unsigned short hid) {
 - (void)deleteBackward {
     NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
     event->_msKeyCode = 51;
-    event->_msCharacters = @"\u007f";
+    unichar del = 0x7f;
+    event->_msCharacters = [NSString stringWithCharacters:&del length:1];
     [self keyDown:event];
 }
 @end
@@ -645,7 +646,9 @@ static UIWindowScene *ms_active_scene(void) {
     NSEvent *nsEvent = event;
     CGPoint point = [nsEvent locationInWindow];
     UIView *hit = [_msContentView hitTest:point withEvent:nil];
-    UIView *target = hit ? hit : _msContentView;
+    // The target is an NSView in practice (Qt's QNSView); the AppKit selectors are not visible on
+    // UIView, so go through id.
+    id target = (id)(hit ? hit : _msContentView);
     switch ([nsEvent type]) {
         case 1: [target mouseDown:nsEvent]; break;
         case 2: [target mouseUp:nsEvent]; break;
@@ -688,7 +691,9 @@ static UIWindowScene *ms_active_scene(void) {
         NSNotification *note = [NSNotification
             notificationWithName:@"NSApplicationDidFinishLaunchingNotification"
                           object:self];
-        [delegate applicationDidFinishLaunching:note];
+        // NSApplicationDelegate, not UIApplicationDelegate: the iOS SDK declares the latter on
+        // UIApplication, so the call goes through id.
+        [(id)delegate applicationDidFinishLaunching:note];
     }
     [[NSNotificationCenter defaultCenter]
         postNotificationName:@"NSApplicationDidFinishLaunchingNotification"

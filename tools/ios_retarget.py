@@ -17,8 +17,8 @@ One file per run, written to a new path (the input is never modified):
                @executable_path/../Frameworks/... -> @rpath/...
                @executable_path/../Frameworks / @loader_path/../Frameworks rpath -> @executable_path/Frameworks
   shim         frameworks with no iOS equivalent -> @rpath/libMacShim.dylib
-  execute      MH_EXECUTE -> MH_DYLIB (`__PAGEZERO`'s load command becomes `LC_ID_DYLIB`, `LC_MAIN`
-               stays so the host can call it, MH_PIE cleared), as LiveContainer does
+  execute      MH_EXECUTE -> MH_DYLIB, `__PAGEZERO` maps at 0xffffc000/0x4000, `LC_MAIN` stays so
+               the host can call it, and segment ordinals stay unchanged
   duplicates   several macOS frameworks map to the same shim path: keep the first load command and
                renumber the import ordinals so every bind still reaches the right library
   --reroute    imports listed in FILE bind to libMacShim instead of the library the macOS binary
@@ -40,6 +40,7 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
 MH_DYLIB = 6
 MH_PIE = 0x200000
+MH_NO_REEXPORTED_DYLIBS = 0x1000000
 
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
@@ -240,50 +241,26 @@ def make_loadable(data: bytearray) -> list[str]:
     if h["ftype"] != MH_EXECUTE:
         return ["already a dylib/bundle; filetype kept"]
 
-    pagezero = pagezero_size = pagezero_index = None
-    segment_index = 0
-    for off, cmd, size in commands(data):
+    pagezero = None
+    for off, cmd, _size in commands(data):
         if cmd == LC_SEGMENT_64:
             if cstr(data, off + 8, off + 24) == "__PAGEZERO":
-                pagezero, pagezero_size, pagezero_index = off, size, segment_index
-            segment_index += 1
+                pagezero = off
     if pagezero is None:
         raise SystemExit("executable has no __PAGEZERO segment")
 
-    vmaddr, vmsize = struct.unpack_from("<QQ", data, pagezero + 24)
-    if vmsize:
-        struct.pack_into("<QQ", data, pagezero + 24, vmaddr, 0x4000)
-
-    # Classic dyld rebase/bind opcodes and chained fixups both index the segment commands. Chained
-    # fixups need a larger starts table rewrite, which this tool deliberately refuses; classic
-    # opcode indices can be safely decremented when __PAGEZERO is removed.
-    for off, cmd, size in commands(data):
-        if cmd == LC_DYLD_CHAINED_FIXUPS:
-            raise SystemExit(
-                "executable uses chained fixups: converting __PAGEZERO would renumber its segments"
-            )
-
-    if pagezero_index is None:
-        raise SystemExit("could not determine __PAGEZERO segment index")
-    rebases, binds = remap_segment_indices(data, pagezero_index)
-
-    name = b"@rpath/StudioKit.dylib\0"
-    needed = 24 + len(name)
-    if needed > pagezero_size:
-        raise SystemExit(
-            f"__PAGEZERO's load command is too small for LC_ID_DYLIB ({pagezero_size} < {needed})"
-        )
-    data[pagezero : pagezero + pagezero_size] = (
-        struct.pack("<IIIIII", LC_ID_DYLIB, pagezero_size, 24, 2, 0x10000, 0x10000)
-        + name
-        + b"\0" * (pagezero_size - needed)
-    )
+    # Keep the segment command: dyld rebase/bind streams and chained fixups refer to segment
+    # ordinals. Mapping one page at the top of the original 4 GB zero region also avoids reserving
+    # the whole address range.
+    struct.pack_into("<QQ", data, pagezero + 24, 0x100000000 - 0x4000, 0x4000)
 
     struct.pack_into("<I", data, 12, MH_DYLIB)
-    struct.pack_into("<I", data, 24, h["flags"] & ~MH_PIE)
+    struct.pack_into(
+        "<I", data, 24, (h["flags"] & ~MH_PIE) | MH_NO_REEXPORTED_DYLIBS
+    )
     return [
-        f"MH_EXECUTE -> MH_DYLIB (__PAGEZERO -> LC_ID_DYLIB, LC_MAIN kept, PIE off; "
-        f"remapped {rebases} rebase and {binds} bind segment index(es))"
+        "MH_EXECUTE -> MH_DYLIB (__PAGEZERO mapped at 0xffffc000/0x4000, LC_MAIN kept, "
+        "PIE off, no re-exports; segment ordinals preserved)"
     ]
 
 
@@ -302,88 +279,6 @@ def _skip_uleb(data: bytearray, i: int) -> int:
     while data[i] & 0x80:
         i += 1
     return i + 1
-
-
-def _skip_uleb_checked(data: bytearray, i: int, end: int, which: str) -> int:
-    while i < end:
-        byte = data[i]
-        i += 1
-        if not byte & 0x80:
-            return i
-    raise SystemExit(f"{which}: unterminated ULEB128")
-
-
-def _shift_segment_index(index: int, removed: int, which: str) -> int:
-    if index == removed:
-        raise SystemExit(f"{which}: opcode targets removed __PAGEZERO segment {removed}")
-    return index - 1 if index > removed else index
-
-
-def remap_rebase_segments(data: bytearray, off: int, size: int, removed: int) -> int:
-    """Adjust classic rebase segment ordinals after removing __PAGEZERO."""
-    if not size:
-        return 0
-    i, end, changed = off, off + size, 0
-    if off < 0 or end > len(data):
-        raise SystemExit("rebase stream extends beyond the Mach-O file")
-    while i < end:
-        pos = i
-        raw = data[i]
-        op, imm = raw & 0xF0, raw & 0x0F
-        i += 1
-        if op == 0x00:  # DONE; remaining bytes are linker padding
-            break
-        if op == 0x20:  # SET_SEGMENT_AND_OFFSET_ULEB
-            i = _skip_uleb_checked(data, i, end, "rebase")
-            shifted = _shift_segment_index(imm, removed, "rebase")
-            if shifted != imm:
-                data[pos] = op | shifted
-                changed += 1
-        elif op in (0x10, 0x40, 0x50):  # TYPE_IMM / ADD_ADDR_IMM_SCALED / DO_REBASE_IMM_TIMES
-            continue
-        elif op in (0x30, 0x60, 0x70):  # one ULEB operand
-            i = _skip_uleb_checked(data, i, end, "rebase")
-        elif op == 0x80:  # DO_REBASE_ULEB_TIMES_SKIPPING_ULEB
-            i = _skip_uleb_checked(data, i, end, "rebase")
-            i = _skip_uleb_checked(data, i, end, "rebase")
-        else:
-            _bad_opcode(data, pos, "rebase")
-    return changed
-
-
-def remap_bind_segments(data: bytearray, off: int, size: int, removed: int, which: str) -> int:
-    """Adjust classic bind segment ordinals without changing their dylib ordinals."""
-    if not size:
-        return 0
-    i, end, changed = off, off + size, 0
-    if off < 0 or end > len(data):
-        raise SystemExit(f"{which}: bind stream extends beyond the Mach-O file")
-    while i < end:
-        pos = i
-        i, kind, value = _bind_step(data, i, end, which)
-        if kind == "segment_imm":
-            shifted = _shift_segment_index(value, removed, which)
-            if shifted != value:
-                data[pos] = 0x70 | shifted
-                changed += 1
-    return changed
-
-
-def remap_segment_indices(data: bytearray, removed: int) -> tuple[int, int]:
-    """Remap classic dyld-info segment ordinals before a segment load command is removed."""
-    rebases = binds = 0
-    for off, cmd, _size in commands(data):
-        if cmd not in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
-            continue
-        fields = struct.unpack_from("<10I", data, off + 8)
-        rebases += remap_rebase_segments(data, fields[0], fields[1], removed)
-        for start, length, kind in (
-            (fields[2], fields[3], "bind"),
-            (fields[4], fields[5], "weak bind"),
-            (fields[6], fields[7], "lazy bind"),
-        ):
-            binds += remap_bind_segments(data, start, length, removed, kind)
-    return rebases, binds
 
 
 def _bad_opcode(data: bytearray, pos: int, which: str) -> None:

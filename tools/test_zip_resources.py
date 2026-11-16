@@ -51,6 +51,7 @@ class ZipResourceTests(unittest.TestCase):
     def test_extracts_only_resources_and_verifies_files(self):
         directory, destination, result = self.run_extractor(
             [
+                ("RobloxStudio.app/Contents/Resources/", b""),
                 ("RobloxStudio.app/Contents/Resources/AppSettings.xml", b"<settings/>"),
                 ("RobloxStudio.app/Contents/Resources/Fonts/Regular.otf", b"font-data"),
                 ("RobloxStudio.app/Contents/MacOS/RobloxStudio", b"not extracted"),

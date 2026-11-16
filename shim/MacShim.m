@@ -28,6 +28,8 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <pwd.h>
+#import <stdio.h>
 #import <fcntl.h>
 #import <execinfo.h>
 #import <signal.h>
@@ -1273,6 +1275,232 @@ static void ms_log_allocator(void) {
     }
 }
 
+// Studio resolves `~` from the passwd entry, not from NSHomeDirectory: StudioKit imports getpwuid
+// and getpwuid_r, QtCore getpwuid_r and QtWidgets getpwnam_r. iOS pins uid 501's pw_dir to
+// /var/mobile, so the guest's settings root becomes /var/mobile/Library/Roblox, the sandbox refuses
+// that mkdir, and Studio aborts before its first window ("boost::filesystem::create_directories:
+// Operation not permitted"). A sandboxed app owns its container instead and NSHomeDirectory() is
+// exactly that, so the current user's passwd home is rewritten to it here: every macOS-style
+// ~/Library path then resolves inside the container, which the app can write.
+//
+// The interception is a __DATA,__interpose table, which dyld only reads from images loaded at
+// launch. libMacShim.dylib is one (the host links it), the same reason libmimalloc.3.dylib has to
+// be.
+//
+// The real entry points cannot come from dlsym(RTLD_NEXT): libsystem_c is an earlier launch image
+// than this dylib, so RTLD_NEXT would start its search past it. The image dyld actually mapped is
+// dlopen'd by path instead, and the synthesised entry below covers the case where even that fails.
+static char gGuestHome[PATH_MAX];
+static char gGuestName[64];
+static char gSynthPasswdBuffer[PATH_MAX + 256];
+static struct passwd gSynthPasswd;
+static struct passwd *(*gRealGetpwuid)(uid_t);
+static int (*gRealGetpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
+static struct passwd *(*gRealGetpwnam)(const char *);
+static int (*gRealGetpwnam_r)(const char *, struct passwd *, char *, size_t, struct passwd **);
+// Interposition is process wide, so a real call that comes back through these wrappers must not
+// recurse: the synthesised entry serves that case.
+static __thread int tInsidePasswd;
+static __thread int tFindingHome;
+
+static const char *ms_guest_home(void) {
+    if (!gGuestHome[0] && !tFindingHome) {
+        tFindingHome = 1;
+        NSString *home = NSHomeDirectory();
+        // Never redirect to "" or "/": an unwritable home would fail exactly like /var/mobile.
+        if (home.length > 1)
+            snprintf(gGuestHome, sizeof gGuestHome, "%s", home.fileSystemRepresentation);
+        tFindingHome = 0;
+    }
+    return gGuestHome[0] ? gGuestHome : NULL;
+}
+
+static const char *ms_guest_name(void) {
+    if (!gGuestName[0]) {
+        const char *name = getenv("USER");
+        snprintf(gGuestName, sizeof gGuestName, "%s", (name && *name) ? name : "mobile");
+    }
+    return gGuestName;
+}
+
+static void *ms_libsystem_c(void) {
+    static void *handle;
+    static int looked;
+    if (looked) return handle;
+    looked = 1;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count && !handle; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        if (!strstr(name, "libsystem_c.dylib") && !strstr(name, "libSystem.B.dylib")) continue;
+        handle = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+    }
+    return handle;
+}
+
+static void *ms_passwd_symbol(const char *name) {
+    void *symbol = dlsym(RTLD_NEXT, name);
+    if (symbol) return symbol;
+    void *handle = ms_libsystem_c();
+    return handle ? dlsym(handle, name) : NULL;
+}
+
+static void ms_resolve_passwd(void) {
+    if (!gRealGetpwuid) gRealGetpwuid = (struct passwd *(*)(uid_t))ms_passwd_symbol("getpwuid");
+    if (!gRealGetpwuid_r)
+        gRealGetpwuid_r = (int (*)(uid_t, struct passwd *, char *, size_t, struct passwd **))
+            ms_passwd_symbol("getpwuid_r");
+    if (!gRealGetpwnam) gRealGetpwnam = (struct passwd *(*)(const char *))ms_passwd_symbol("getpwnam");
+    if (!gRealGetpwnam_r)
+        gRealGetpwnam_r =
+            (int (*)(const char *, struct passwd *, char *, size_t, struct passwd **))
+                ms_passwd_symbol("getpwnam_r");
+}
+
+// Only the current user is redirected: a lookup of another account has to keep the passwd data iOS
+// reports. Written in place because getpwuid_r's result belongs to the caller and has to stay
+// reentrant.
+static void ms_redirect_home(struct passwd *pw) {
+    const char *home;
+    if (!pw || pw->pw_uid != getuid()) return;
+    home = ms_guest_home();
+    if (home) pw->pw_dir = (char *)home;
+}
+
+// A current-user passwd entry for the lookups the real functions cannot serve.
+static int ms_synthesize_passwd(struct passwd *pw, char *buf, size_t buflen) {
+    const char *name = ms_guest_name();
+    const char *home = ms_guest_home();
+    const char *shell = "/bin/sh";
+    if (!pw || !buf || !home) return EINVAL;
+    size_t nameLen = strlen(name) + 1;
+    size_t homeLen = strlen(home) + 1;
+    size_t shellLen = strlen(shell) + 1;
+    if (nameLen + 2 + 1 + homeLen + shellLen > buflen) return ERANGE;
+    char *at = buf;
+    memset(pw, 0, sizeof *pw);
+    pw->pw_name = at;
+    memcpy(at, name, nameLen);
+    at += nameLen;
+    pw->pw_passwd = at;
+    *at++ = '*';
+    *at++ = '\0';
+    pw->pw_gecos = at;
+    *at++ = '\0';
+    pw->pw_dir = at;
+    memcpy(at, home, homeLen);
+    at += homeLen;
+    pw->pw_shell = at;
+    memcpy(at, shell, shellLen);
+    pw->pw_uid = getuid();
+    pw->pw_gid = getgid();
+    return 0;
+}
+
+struct passwd *ms_getpwuid(uid_t uid) {
+    ms_resolve_passwd();
+    if (uid != getuid()) return gRealGetpwuid ? gRealGetpwuid(uid) : NULL;
+    if (gRealGetpwuid && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        struct passwd *pw = gRealGetpwuid(uid);
+        tInsidePasswd = 0;
+        if (pw) {
+            ms_redirect_home(pw);
+            return pw;
+        }
+    }
+    return ms_synthesize_passwd(&gSynthPasswd, gSynthPasswdBuffer, sizeof gSynthPasswdBuffer) == 0
+               ? &gSynthPasswd
+               : NULL;
+}
+
+int ms_getpwuid_r(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
+                  struct passwd **result) {
+    ms_resolve_passwd();
+    if (result) *result = NULL;
+    if (gRealGetpwuid_r && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        int rc = gRealGetpwuid_r(uid, pw, buf, buflen, result);
+        tInsidePasswd = 0;
+        if (rc == 0 && result && *result) ms_redirect_home(*result);
+        return rc;
+    }
+    if (uid != getuid()) return ENOENT;
+    int rc = ms_synthesize_passwd(pw, buf, buflen);
+    if (rc == 0 && result) *result = pw;
+    return rc;
+}
+
+struct passwd *ms_getpwnam(const char *name) {
+    ms_resolve_passwd();
+    if (!name) return NULL;
+    if (gRealGetpwnam && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        struct passwd *pw = gRealGetpwnam(name);
+        tInsidePasswd = 0;
+        if (!pw) return NULL;
+        ms_redirect_home(pw);
+        return pw;
+    }
+    if (strcmp(name, ms_guest_name()) != 0) return NULL;
+    return ms_synthesize_passwd(&gSynthPasswd, gSynthPasswdBuffer, sizeof gSynthPasswdBuffer) == 0
+               ? &gSynthPasswd
+               : NULL;
+}
+
+int ms_getpwnam_r(const char *name, struct passwd *pw, char *buf, size_t buflen,
+                  struct passwd **result) {
+    ms_resolve_passwd();
+    if (result) *result = NULL;
+    if (name && gRealGetpwnam_r && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        int rc = gRealGetpwnam_r(name, pw, buf, buflen, result);
+        tInsidePasswd = 0;
+        if (rc == 0 && result && *result) ms_redirect_home(*result);
+        return rc;
+    }
+    if (!name || strcmp(name, ms_guest_name()) != 0) return ENOENT;
+    int rc = ms_synthesize_passwd(pw, buf, buflen);
+    if (rc == 0 && result) *result = pw;
+    return rc;
+}
+
+typedef struct {
+    const void *replacement;
+    const void *replacee;
+} ms_interposer_t;
+
+__attribute__((used, section("__DATA,__interpose")))
+static const ms_interposer_t ms_passwd_interposers[] = {
+    {(const void *)ms_getpwuid, (const void *)getpwuid},
+    {(const void *)ms_getpwuid_r, (const void *)getpwuid_r},
+    {(const void *)ms_getpwnam, (const void *)getpwnam},
+    {(const void *)ms_getpwnam_r, (const void *)getpwnam_r},
+};
+
+static void ms_log_guest_home(void) {
+    ms_resolve_passwd();
+    const char *home = ms_guest_home();
+    // Read the unredirected entry: the interposed getpwuid rewrites the entry in place.
+    struct passwd *before = gRealGetpwuid ? gRealGetpwuid(getuid()) : NULL;
+    const char *envHome = getenv("HOME");
+    studpad_log("guest home: %s", home ? home : "unavailable");
+    studpad_log("guest home: passwd home was %s, HOME was %s, uid %u",
+                before && before->pw_dir ? before->pw_dir : "unreachable",
+                envHome ? envHome : "unset", (unsigned)getuid());
+    // Qt asks HOME before it falls back to passwd, and Foundation prefers CFFIXED_USER_HOME to the
+    // container: pin both to the same directory so every home lookup the guest makes agrees.
+    if (home) {
+        setenv("HOME", home, 1);
+        setenv("CFFIXED_USER_HOME", home, 1);
+    }
+    if (!gRealGetpwuid || !gRealGetpwuid_r || !gRealGetpwnam || !gRealGetpwnam_r)
+        studpad_log("guest home: libsystem_c's passwd functions are unreachable; lookups are served "
+                    "from a synthesised entry");
+    if (home && access(home, W_OK) != 0)
+        studpad_log("guest home: %s is not writable (errno %d); Studio will not be able to save",
+                    home, errno);
+}
 static int ms_jit_enabled(void) {
     typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);
     CSOps csops = (CSOps)dlsym(RTLD_DEFAULT, "csops");
@@ -1313,6 +1541,7 @@ static void ms_log_runtime_environment(void) {
                     "com.kuywoh.studpadstudio with GetMoreRam and refresh SideStore");
     }
     ms_log_allocator();
+    ms_log_guest_home();
 }
 
 void studpad_set_studio_launch_path(const char *path) {

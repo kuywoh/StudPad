@@ -30,6 +30,13 @@ loaded at launch, so the build links that dylib into the host executable. `dlope
 leaves Qt on `libsystem_malloc` and Studio on mimalloc, and the first free across the two heaps
 aborts inside `libsystem_malloc` during StudioKit's dyld initialisers.
 
+Studio's `~` comes from the passwd entry, not from `NSHomeDirectory()`: StudioKit imports
+`getpwuid`/`getpwuid_r`, QtCore `getpwuid_r` and QtWidgets `getpwnam_r`. iOS reports `/var/mobile`
+there, so Studio tried to create `/var/mobile/Library/Roblox`, the sandbox refused that `mkdir`, and
+Studio aborted before its first window. The shim interposes those four calls for the current user
+only and reports the app container instead, and pins `HOME` and `CFFIXED_USER_HOME` to it so
+every home lookup the guest makes agrees.
+
 ## Build it
 
 Actions → **studio-build** → *Run workflow* (or push to `shim/`, `app/`, `tools/`, `studio/`).
@@ -61,6 +68,7 @@ debugger attached: yes|no
 JIT: executable mmap granted|refused (errno …)
 memory: 1234 MB available to this process      # current headroom; not the per-app limit
 allocator: malloc(64) -> mimalloc heap …       # libsystem_malloc here means Qt and Studio mix heaps
+guest home: /var/mobile/Containers/Data/…/    # Studio's ~; the line below says what it used to be
 dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
 calling Studio main
 [shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window

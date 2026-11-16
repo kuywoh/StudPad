@@ -142,6 +142,16 @@ def main():
         fail(f"shim filetype/platform {shim['filetype']}/{shim['platform']}, expected 6/2")
     if shim["id"] != "@rpath/libMacShim.dylib":
         fail(f"shim LC_ID_DYLIB is {shim['id']!r}")
+    # Studio takes `~` from the passwd entry (StudioKit imports getpwuid/getpwuid_r, Qt getpwnam_r),
+    # and iOS reports /var/mobile there; the sandbox then refuses Studio's ~/Library/Roblox mkdir.
+    # The shim interposes those calls to report the app container, so the tuples must be in the
+    # shipped dylib: dyld only reads __interpose from launch images, and the host links the shim.
+    passwd_interposers = active_interpose_tuple_count(z.read(SHIM))
+    if passwd_interposers < 4:
+        fail(
+            f"shim has {passwd_interposers} active __interpose tuple(s); the passwd home "
+            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r "
+        )
 
     host_data = z.read(HOST)
     host = inspect(host_data)
@@ -190,7 +200,8 @@ def main():
     print(
         f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
         f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples) and a host "
-        f"launch load command; shim {len(shim['loads'])} re-exported frameworks; "
+        f"launch load command; shim {len(shim['loads'])} re-exported frameworks and "
+        f"{passwd_interposers} passwd interposer(s); "
         f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
         f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )

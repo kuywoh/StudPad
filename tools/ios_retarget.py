@@ -146,6 +146,10 @@ def cstr(data: bytearray, start: int, end: int) -> str:
     return bytes(data[start:nul]).decode("utf-8", "replace")
 
 
+def fixed_name(data: bytearray, start: int) -> str:
+    return bytes(data[start : start + 16]).split(b"\0", 1)[0].decode("utf-8", "replace")
+
+
 def dylib_name(data: bytearray, off: int, size: int) -> tuple[int, str]:
     name_off = struct.unpack_from("<I", data, off + 8)[0]
     return name_off, cstr(data, off + name_off, off + size)
@@ -245,7 +249,7 @@ def make_loadable(data: bytearray) -> list[str]:
     pagezero = None
     for off, cmd, _size in commands(data):
         if cmd == LC_SEGMENT_64:
-            if cstr(data, off + 8, off + 24) == "__PAGEZERO":
+            if fixed_name(data, off + 8) == "__PAGEZERO":
                 pagezero = off
     if pagezero is None:
         raise SystemExit("executable has no __PAGEZERO segment")
@@ -279,14 +283,14 @@ def add_dylib_id(data: bytearray) -> str:
     for off, cmd, size in load_commands:
         if cmd == LC_LOAD_DYLINKER:
             dylinker = (off, size)
-        if cmd != LC_SEGMENT_64 or cstr(data, off + 8, off + 24) != "__TEXT":
+        if cmd != LC_SEGMENT_64 or fixed_name(data, off + 8) != "__TEXT":
             continue
         nsects = struct.unpack_from("<I", data, off + 64)[0]
         if 72 + nsects * 80 > size:
             raise SystemExit("__TEXT segment has a truncated section table")
         for i in range(nsects):
             section = off + 72 + i * 80
-            section_name = cstr(data, section, section + 16)
+            section_name = fixed_name(data, section)
             section_offset = struct.unpack_from("<I", data, section + 48)[0]
             if section_name == "__text" and section_offset:
                 text_offset = section_offset if text_offset is None else min(text_offset, section_offset)

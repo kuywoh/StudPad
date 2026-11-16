@@ -23,6 +23,13 @@ after adding the capability. The app also offers a StikDebug handoff using its b
 process ID. Pair StikDebug and assign its current `universal.js` script first. JIT is optional: static
 inspection found no Studio JIT imports, and StikDebug is only a diagnostic/runtime option.
 
+Studio's allocator is not optional. Its executable links `libmimalloc.3.dylib`, whose
+`__DATA,__interpose` table makes `malloc`/`free` resolve to `mi_malloc`/`mi_free`, and StudioKit
+calls `mi_*` directly as well — on macOS that is one heap. dyld only reads `__interpose` from images
+loaded at launch, so the build links that dylib into the host executable. `dlopen`ing it instead
+leaves Qt on `libsystem_malloc` and Studio on mimalloc, and the first free across the two heaps
+aborts inside `libsystem_malloc` during StudioKit's dyld initialisers.
+
 ## Build it
 
 Actions → **studio-build** → *Run workflow* (or push to `shim/`, `app/`, `tools/`, `studio/`).
@@ -53,6 +60,7 @@ open it again. The useful lines include:
 debugger attached: yes|no
 JIT: executable mmap granted|refused (errno …)
 memory: 1234 MB available to this process      # current headroom; not the per-app limit
+allocator: malloc(64) -> mimalloc heap …       # libsystem_malloc here means Qt and Studio mix heaps
 dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
 calling Studio main
 [shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window

@@ -548,6 +548,18 @@ static unsigned short ms_mac_keycode(unsigned short hid) {
 }
 @end
 
+// Qt asks NSApp for its windows; without this every lookup would say "none" and a window that is
+// on screen would look unparented to it.
+static NSMutableArray *gWindows = nil;
+
+static void ms_track_window(NSWindow *window) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gWindows = [NSMutableArray new]; });
+    @synchronized(gWindows) {
+        [gWindows addObject:window];
+    }
+}
+
 static UIWindowScene *ms_active_scene(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if ([scene isKindOfClass:UIWindowScene.class]) return (UIWindowScene *)scene;
@@ -572,6 +584,7 @@ static UIWindowScene *ms_active_scene(void) {
         self.rootViewController = _msController;
         studpad_log("[shim] NSWindow(UIWindow) %p %.0fx%.0f scene=%p", self, rect.size.width,
                     rect.size.height, scene);
+        ms_track_window(self);
     }
     return self;
 }
@@ -667,6 +680,18 @@ static UIWindowScene *ms_active_scene(void) {
     BOOL _msShouldTerminate;
     BOOL _msActive;
 }
+- (id)ms_lastWindow;
+@end
+
+@implementation NSApplication (Windows)
+- (id)ms_lastWindow {
+    @synchronized(gWindows) {
+        for (NSWindow *window in gWindows.reverseObjectEnumerator) {
+            if (window.isVisible) return window;
+        }
+    }
+    return nil;
+}
 @end
 
 @implementation NSApplication
@@ -716,17 +741,26 @@ static UIWindowScene *ms_active_scene(void) {
 - (void)postEvent:(id)event atStart:(BOOL)start { (void)event; (void)start; }
 - (void)sendEvent:(id)event { (void)event; }
 - (void)activateIgnoringOtherApps:(BOOL)ignore { (void)ignore; _msActive = YES; }
-- (BOOL)isActive { return _msActive; }
+- (BOOL)isActive { return YES; }
 - (BOOL)isRunning { return YES; }
 - (void)setActivationPolicy:(long)policy { (void)policy; }
 - (long)activationPolicy { return 0; }
 - (void)setMainMenu:(id)menu { _msMainMenu = menu; }
 - (id)mainMenu { return _msMainMenu; }
 - (void)setServicesMenu:(id)menu { (void)menu; }
-- (id)windows { return @[]; }
-- (id)keyWindow { return nil; }
-- (id)mainWindow { return nil; }
-- (id)windowWithWindowNumber:(long)number { (void)number; return nil; }
+- (id)windows {
+    @synchronized(gWindows) {
+        return gWindows.count ? [gWindows copy] : @[];
+    }
+}
+- (id)keyWindow { return [self ms_lastWindow]; }
+- (id)mainWindow { return [self ms_lastWindow]; }
+- (id)windowWithWindowNumber:(long)number {
+    (void)number;
+    @synchronized(gWindows) {
+        return gWindows.count ? gWindows[0] : nil;
+    }
+}
 - (void)setApplicationIconImage:(id)image { (void)image; }
 - (BOOL)sendAction:(SEL)action to:(id)target from:(id)sender {
     (void)action; (void)target; (void)sender;

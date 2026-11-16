@@ -55,9 +55,25 @@ event loop, native menus, panels, tracking areas and text input contexts. The al
 Qt's iOS `qios` plugin against Studio's exact Qt 5.15 build — needs Qt sources matching that ABI and
 is its own project.
 
-So the build does not pretend to have a desktop UI yet. It forces Qt's **offscreen** platform and
-the **Fusion** style, which lets Qt Widgets construct and layout without a window server, and logs
-where Studio stops. That answers the questions that decide the next phase:
+The build therefore runs Qt's **Cocoa** platform plugin, because that is the only path that can put
+Studio on screen, and the shim is shaped around what that plugin actually needs rather than around a
+model AppKit:
+
+- `NSView` *is* a `UIView`, so the `QNSView` Qt instantiates (it subclasses `NSView` by name at load
+time) is a real UIKit view: UIKit calls Qt's `drawRect:`, and `NSGraphicsContext` hands Qt the current
+UIKit `CGContext` instead of NULL.
+- `NSWindow` *is* a `UIWindow` with a window scene and a root view controller, so `[view window]` is
+the right object for both sides.
+- `UITouch` becomes an `NSEvent` and goes straight into `QNSView`'s `mouseDown:`/`mouseDragged:`/
+`mouseUp:`; `UIKey` HID usages map to macOS virtual keycodes for `keyDown:`; a two-finger pan becomes
+`scrollWheel:`. Qt queues these through `QWindowSystemInterface` as usual, and the shim pumps the main
+`NSRunLoop` while Qt waits for events so UIKit keeps delivering input.
+- The shim re-exports every iOS framework the retargeted images link. That is not cosmetic: a
+  reroute rewrites an ordinal opcode in place, several imports can share one, so a whole library's
+  binds can move to the shim and must still resolve to the real implementation.
+
+The **Fusion** style is still forced, so the UI does not depend on Qt's macOS style plugin. The first
+launch answers the questions that decide the next phase:
 
 - Does dyld accept the retargeted Studio and all nine Qt frameworks, with the shim satisfying every
   AppKit/Carbon import? (`check_binds.py` proves the linking on the runner; only the device proves

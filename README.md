@@ -9,10 +9,18 @@ it. That is the same three-part architecture [CyPort](https://github.com/Thijs20
 run a Mac game on iPhone/iPad, and [Slashplayed](https://github.com/paulstraw/slashplayed) uses for a
 Mac game client. See [docs/cyport.md](docs/cyport.md).
 
-**Status: bring-up.** The build produces an installable IPA that loads Studio's images and logs where
-it stops. It is **not** a working Studio: Qt runs on its offscreen platform because making Qt's Cocoa
-platform plugin behave over UIKit is the open problem. [docs/phase0.md](docs/phase0.md) has the
-static analysis (2,589 imports, 387 missing) and the feasibility verdict.
+**Status: first runnable build.** The pipeline produces a verified, sideloadable IPA: Studio's images
+are retargeted, every one of the ~8,200 imports the shim has to satisfy resolves, and the host app
+opens a UIKit-backed window into which Qt's own Cocoa platform plugin draws. What is **unverified** is
+how far Studio gets on the device: that is what `Documents/studio.log` records on the first launch.
+[docs/phase0.md](docs/phase0.md) has the static analysis and the feasibility verdict.
+
+Why the shim is shaped the way it is: on iOS 26 the JIT question and the memory question are separate
+from loading, and both are handled the way [Henge](https://github.com/Leviidev/Henge) documents for
+iOS 26 — an attached debugger (StikDebug) for executable memory, and `increased-memory-limit` from
+GetMoreRam for the per-app limit. Studio's static imports show no JIT use, so JIT is a safety net, not
+a requirement. The app logs whether a debugger is attached, whether an RWX mapping is granted, and how
+much memory the process actually has.
 
 ## Build it
 
@@ -31,13 +39,31 @@ even when the build fails. Roughly 10–15 minutes on a `macos-15` runner.
    a 200 MB executable plus Qt; the default per-app limit is the first wall it hits. Reinstall/refresh
    in SideStore afterwards so the new profile is used.
 3. SideStore → My Apps → **+** → `StudPadStudio.ipa`.
-4. Optional: [StikDebug](https://github.com/StikDebug/StikDebug) if something needs a debugger. It
-   needs `get-task-allow`, which this IPA asks for. Studio does not appear on StikDebug's iOS 26
-   supported-app list, and its static imports show no JIT use, so this is untested and probably
-   unnecessary.
+4. Optional, and only if the log says `JIT: executable mmap refused`: install
+   [StikDebug](https://github.com/StikDebug/StikDebug), pair it, and assign
+   `com.kuywoh.studpadstudio` the `universal.js` script once. On iOS 26 only a debugger that an app's
+   script cooperates with can grant executable memory, so launch StudPad Studio *from StikDebug* after
+   that. This needs `get-task-allow` in the installed signature, which the IPA asks for and the build
+   verifies. Nothing in Studio's static imports uses a JIT, so this is a safety net; the log reports
+   `debugger attached: yes` and `JIT: executable mmap granted` when it is working.
 
 Then open **StudPad Studio** and read the log (on screen, and in Files → On My iPad → StudPad Studio →
-`studio.log`). `[stub]` and `[miss]` lines name the next thing to implement.
+`studio.log`). The interesting lines, in order:
+
+```
+debugger attached: yes|no
+JIT: executable mmap granted|refused (errno …)
+memory: 1234 MB available to this process      # low means GetMoreRam did not reach the profile
+dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
+calling Studio main
+[shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window
+[stub] … / [miss] -[NSView …]                 # the next API to implement
+```
+
+Tapping the Studio window the first time gives it keyboard focus; hardware keyboards send HID
+keycodes, mapped to macOS virtual keycodes in the shim. A two-finger pan becomes a scroll wheel
+event. To fall back to Qt's offscreen platform (no window, log only), write
+`Documents/studpad.plist` with `QtPlatform = offscreen`.
 
 ## Layout
 
@@ -47,8 +73,8 @@ Then open **StudPad Studio** and read the log (on screen, and in Files → On My
 | `recon/studio_recon.py` | Mach-O inventory, imports, iOS SDK gap ranking → the Phase 0 report |
 | `tools/ios_retarget.py` | Platform/path/shim rewrite, `MH_EXECUTE`→`MH_DYLIB`, duplicate and ordinal handling |
 | `tools/plan_shim.py` | Works out which symbols iOS lacks and generates logging stubs + the reroute list |
-| `tools/check_binds.py` | Refuses a build whose shim cannot satisfy every bound import |
-| `shim/MacShim.m` | AppKit-over-UIKit slice, `MSStubObject`, guest loader, logging |
+| `tools/check_binds.py` | Reads every bind from the Mach-O itself; refuses a build the shim cannot satisfy, and lists the frameworks to re-export |
+| `shim/MacShim.m` | UIKit-backed `NSApplication`/`NSWindow`/`NSView`, drawing and event bridge, `MSStubObject`, guest loader, JIT/memory probe, logging |
 | `app/starter.m`, `app/Info.plist` | The UIKit host app and its bundle |
 | `app/entitlements-sideload.plist` | What the IPA asks for: memory limit, extended addressing, `get-task-allow` |
 | `studio/build.sh`, `studio/verify.py` | The pipeline and its packaging check |

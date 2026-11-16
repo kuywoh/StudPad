@@ -281,6 +281,15 @@ def _skip_uleb(data: bytearray, i: int) -> int:
     return i + 1
 
 
+def _skip_uleb_checked(data: bytearray, i: int, end: int, which: str) -> int:
+    while i < end:
+        byte = data[i]
+        i += 1
+        if not byte & 0x80:
+            return i
+    raise SystemExit(f"{which}: unterminated ULEB128")
+
+
 def _bad_opcode(data: bytearray, pos: int, which: str) -> None:
     snippet = bytes(data[max(0, pos - 8) : pos + 12]).hex()
     raise SystemExit(

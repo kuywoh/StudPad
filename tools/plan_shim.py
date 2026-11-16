@@ -71,9 +71,23 @@ REEXPORTS = [
     "AudioToolbox",
 ]
 
-# Classes that must never be replaced by a stub, whatever the SDK scan says: objc itself, the shim's
-# own root class, and NSObject are load-bearing for every other class.
-NEVER_STUB_CLASSES = {"NSObject", "NSProxy", "MSStubObject"}
+# Core Foundation classes must resolve to the iOS Foundation re-export, never to the generated
+# MSStubObject placeholders. The SDK scan can miss class exports when a macOS ordinal is absorbed.
+FOUNDATION_RUNTIME_CLASSES = {
+    "NSArray", "NSMutableArray", "NSDictionary", "NSMutableDictionary", "NSSet", "NSMutableSet",
+    "NSString", "NSMutableString", "NSNumber", "NSDecimalNumber", "NSData", "NSMutableData",
+    "NSDate", "NSNull", "NSValue", "NSError", "NSException", "NSBundle", "NSFileManager",
+    "NSProcessInfo", "NSNotification", "NSNotificationCenter", "NSNotificationQueue",
+    "NSOperation", "NSOperationQueue", "NSThread", "NSRunLoop", "NSLock", "NSCondition",
+    "NSUUID", "NSLocale", "NSCharacterSet", "NSPredicate", "NSPropertyListSerialization",
+    "NSJSONSerialization", "NSXMLParser", "NSUserDefaults", "NSIndexPath", "NSIndexSet",
+    "NSURL", "NSURLComponents", "NSURLQueryItem", "NSURLRequest", "NSMutableURLRequest",
+    "NSURLResponse", "NSHTTPURLResponse", "NSURLSession", "NSURLSessionConfiguration",
+    "NSURLSessionTask", "NSURLSessionDataTask", "NSURLSessionDownloadTask",
+    "NSURLSessionUploadTask", "NSURLCache", "NSHTTPCookie", "NSHTTPCookieStorage",
+    "NSCachedURLResponse", "NSURLCredential", "NSURLCredentialStorage", "NSURLProtectionSpace",
+}
+NEVER_STUB_CLASSES = {"NSObject", "NSProxy", "MSStubObject"} | FOUNDATION_RUNTIME_CLASSES
 
 
 def sdk_symbols(sdk: str) -> set[str]:

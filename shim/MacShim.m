@@ -184,6 +184,14 @@ static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *pat
     return CFBridgingRelease(value);
 }
 
+static id ms_url_with_string(id receiver, SEL command, NSString *string) {
+    (void)receiver;
+    (void)command;
+    if (![string isKindOfClass:NSString.class]) return nil;
+    CFURLRef url = CFURLCreateWithString(kCFAllocatorDefault, (__bridge CFStringRef)string, NULL);
+    return url ? CFBridgingRelease(url) : nil;
+}
+
 static id ms_data_contents_of_file(id receiver, SEL command, NSString *path) {
     (void)receiver;
     (void)command;
@@ -212,6 +220,9 @@ static void ms_install_foundation_file_readers(void) {
     ms_install_file_reader(objc_getClass("NSData"),
         sel_registerName("dataWithContentsOfFile:"),
         (IMP)ms_data_contents_of_file, "NSData");
+    ms_install_file_reader(objc_getClass("NSURL"),
+        sel_registerName("URLWithString:"),
+        (IMP)ms_url_with_string, "NSURL");
 }
 
 @implementation MSStubObject
@@ -238,6 +249,10 @@ static void ms_install_foundation_file_readers(void) {
     if (strcmp(name, "NSData") == 0 &&
         sel_isEqual(sel, sel_registerName("dataWithContentsOfFile:"))) {
         return ms_install_file_reader(self, sel, (IMP)ms_data_contents_of_file, "NSData");
+    }
+    if (strcmp(name, "NSURL") == 0 &&
+        sel_isEqual(sel, sel_registerName("URLWithString:"))) {
+        return ms_install_file_reader(self, sel, (IMP)ms_url_with_string, "NSURL");
     }
     return [self ms_claim:sel isClass:YES];
 }

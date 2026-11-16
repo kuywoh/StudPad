@@ -116,7 +116,36 @@ long studpad_stub_count(void) { return gStubTotal; }
 
 static void ms_zero_imp(id self, SEL _cmd) { (void)self; (void)_cmd; }
 
+// Some Studio builds send the legacy NSDictionary file-loading selector, which is absent from
+// the iOS Foundation class available to the retargeted guest. Keep property-list reading functional
+// for both the UIKit host's StudioPackage.plist and Studio's own settings files.
+static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *path) {
+    (void)receiver;
+    (void)command;
+    if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return nil;
+    id value = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:NULL error:NULL];
+    if (!value || CFGetTypeID((__bridge CFTypeRef)value) != CFDictionaryGetTypeID()) return nil;
+    return value;
+}
+
+static void ms_install_dictionary_file_reader(void) {
+    Class dictionary = objc_getClass("NSDictionary");
+    SEL selector = sel_registerName("dictionaryWithContentsOfFile:");
+    if (!dictionary || class_getClassMethod(dictionary, selector)) return;
+    BOOL installed = class_addMethod(object_getClass(dictionary), selector,
+        (IMP)ms_dictionary_contents_of_file, "@@:@");
+    studpad_log("[shim] NSDictionary file plist fallback %s",
+                installed ? "installed" : "could not be installed");
+}
+
 @implementation MSStubObject
+
++ (void)load {
+    ms_install_dictionary_file_reader();
+}
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
     studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(self), sel_getName(sel));

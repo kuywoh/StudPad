@@ -290,6 +290,10 @@ static void crash_signal(int sig) {
     [stack addArrangedSubview:note];
 
     studpad_set_log_hook(host_log);
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(studpadDidBecomeActive:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
     [self refreshSetupStatus];
 }
 
@@ -595,6 +599,11 @@ static void crash_signal(int sig) {
     [self refreshSetupStatus];
 }
 
+- (void)studpadDidBecomeActive:(NSNotification *)notification {
+    (void)notification;
+    [self refreshSetupStatus];
+}
+
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 
@@ -608,7 +617,7 @@ static void crash_signal(int sig) {
         didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)launchOptions {
     (void)application;
     (void)launchOptions;
-    studpad_log("StudPad build 43 launched");
+    studpad_log("StudPad build 47 launched");
     return YES;
 }
 @end

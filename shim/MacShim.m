@@ -1240,16 +1240,16 @@ static void ms_log_runtime_environment(void) {
                 studpad_increased_memory_enabled() ? "active" : "not present");
     studpad_log("debugger currently tracing (P_TRACED): %s",
                 attached == 1 ? "yes" : attached == 0 ? "no" : "unknown");
-    studpad_log("JIT check (CS_DEBUGGED): %s",
+    studpad_log("JIT entitlement check (CS_DEBUGGED): %s",
                 jitEnabled == 1 ? "enabled" : jitEnabled == 0 ? "not detected" : "unavailable");
 
     void *probe = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANON, -1, 0);
     if (probe == MAP_FAILED) {
-        studpad_log("JIT: executable mmap refused (errno %d); Studio does not use a JIT itself",
+        studpad_log("JIT executable-memory probe: mmap refused (errno %d); this does not test CS_DEBUGGED",
                     errno);
     } else {
-        studpad_log("JIT: executable mmap granted (probe only; Studio has no known JIT imports)");
+        studpad_log("JIT executable-memory probe: mmap granted; this does not prove CS_DEBUGGED or Studio JIT use");
         munmap(probe, 0x4000);
     }
 

@@ -294,6 +294,12 @@ int studpad_extract_resources_zip(const char *zip_path, const char *destination,
             fclose(archive);
             return zip_error(error, error_capacity, "truncated ZIP entry metadata");
         }
+        long next_entry = ftell(archive);
+        if (next_entry < 0) {
+            free(name);
+            fclose(archive);
+            return zip_error(error, error_capacity, "cannot read ZIP directory position");
+        }
 
         size_t prefix_length = (size_t)prefix_size;
         if (strncmp(name, prefix, prefix_length) != 0) {
@@ -389,9 +395,7 @@ int studpad_extract_resources_zip(const char *zip_path, const char *destination,
         extracted++;
         free(name);
 
-        if (fseek(archive, (long)directory_offset +
-                  (long)(sizeof(header) + name_size + extra_size + comment_size),
-                  SEEK_SET) != 0) {
+        if (fseek(archive, next_entry, SEEK_SET) != 0) {
             fclose(archive);
             return zip_error(error, error_capacity, "cannot continue ZIP directory scan");
         }

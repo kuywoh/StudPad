@@ -9,7 +9,7 @@ import re
 import sys
 import stat
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -26,7 +26,7 @@ def read_fetch(path: str | Path) -> dict[str, str]:
 def safe_resource_path(path: str) -> bool:
     if not path or path.startswith("/") or "\\" in path or "\x00" in path:
         return False
-    return all(part not in ("", ".", "..") for part in PurePosixPath(path).parts)
+    return all(part not in ("", ".", "..") for part in path.split("/"))
 
 
 def sha256_file(path: str | Path) -> str:
@@ -37,7 +37,11 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def build_manifest(fetch_path: str | Path, package_path: str | Path) -> dict[str, object]:
+def build_manifest(
+    fetch_path: str | Path,
+    package_path: str | Path,
+    minimum_package_bytes: int = 100 * 1024 * 1024,
+) -> dict[str, object]:
     values = read_fetch(fetch_path)
     required = ("version", "upload", "url", "bytes", "sha256", "app")
     missing = [key for key in required if not values.get(key)]
@@ -59,7 +63,7 @@ def build_manifest(fetch_path: str | Path, package_path: str | Path) -> dict[str
 
     package = Path(package_path)
     package_bytes = int(values["bytes"])
-    if package_bytes <= 100 * 1024 * 1024 or package_bytes != package.stat().st_size:
+    if package_bytes <= minimum_package_bytes or package_bytes != package.stat().st_size:
         raise ValueError("downloaded package size does not match fetch record")
     package_sha = values["sha256"].lower()
     if not re.fullmatch(r"[0-9a-f]{64}", package_sha) or sha256_file(package) != package_sha:

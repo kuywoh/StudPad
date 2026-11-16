@@ -34,7 +34,7 @@ class StudioManifestTests(unittest.TestCase):
     def test_manifest_pins_url_hash_and_resource_count(self):
         with tempfile.TemporaryDirectory() as directory:
             fetch, package = self.make_files(Path(directory))
-            result = build_manifest(fetch, package)
+            result = build_manifest(fetch, package, minimum_package_bytes=0)
             self.assertEqual(result["studio_version"], "0.700.0")
             self.assertEqual(result["resource_files"], 1)
             self.assertEqual(result["resource_bytes"], len(b"settings"))

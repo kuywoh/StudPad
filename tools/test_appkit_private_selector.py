@@ -1,4 +1,4 @@
-"""Regression test for NSApplication's Core Data selector registration hook."""
+"""Regression tests for the NSApplication launch selector compatibility hooks."""
 
 import re
 import unittest
@@ -28,13 +28,13 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
             encoding="utf-8"
         )
         start = source.index("@implementation NSApplication")
-        end = source.index("\\n@end", start)
+        end = source.index("\n@end", start)
         implementation = source[start:end]
 
         self.assertIn("- (NSWindow *)modalWindow;", source)
         self.assertRegex(
             implementation,
-            re.compile(r"-\\s*\\(NSWindow \\*\\)\\s*modalWindow\\s*\\{\\s*return nil;\\s*\\}"),
+            re.compile(r"-\s*\(NSWindow \*\)\s*modalWindow\s*\{\s*return nil;\s*\}"),
         )
 
 

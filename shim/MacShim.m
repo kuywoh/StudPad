@@ -22,6 +22,7 @@
 #import <GameController/GameController.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
@@ -684,7 +685,10 @@ static UIWindowScene *ms_active_scene(void) {
 - (id)ms_lastWindow;
 @end
 
-@implementation NSApplication (Windows)
+
+
+@implementation NSApplication
+
 - (id)ms_lastWindow {
     @synchronized(gWindows) {
         for (NSWindow *window in gWindows.reverseObjectEnumerator) {
@@ -693,9 +697,6 @@ static UIWindowScene *ms_active_scene(void) {
     }
     return nil;
 }
-@end
-
-@implementation NSApplication
 
 + (NSApplication *)sharedApplication {
     static NSApplication *app = nil;
@@ -719,9 +720,9 @@ static UIWindowScene *ms_active_scene(void) {
         NSNotification *note = [NSNotification
             notificationWithName:@"NSApplicationDidFinishLaunchingNotification"
                           object:self];
-        // NSApplicationDelegate, not UIApplicationDelegate: the iOS SDK declares the latter on
-        // UIApplication, so the call goes through id.
-        [(id)delegate applicationDidFinishLaunching:note];
+        // NSApplicationDelegate, not UIApplicationDelegate: the iOS SDK declares that selector on
+        // UIApplication, so it is sent through the runtime to avoid binding the wrong signature.
+        ((void (*)(id, SEL, id))objc_msgSend)(delegate, selector, note);
     }
     [[NSNotificationCenter defaultCenter]
         postNotificationName:@"NSApplicationDidFinishLaunchingNotification"

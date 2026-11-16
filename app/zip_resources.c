@@ -66,21 +66,51 @@ static int make_parents(const char *path) {
     return 0;
 }
 
-static int safe_relative_path(const char *path, size_t length) {
-    if (!length || path[0] == '/' || memchr(path, '\\', length) || memchr(path, '\0', length))
-        return 0;
+static const char *unsafe_relative_path_reason(const char *path, size_t length) {
+    if (!length) return "empty path";
+    if (path[0] == '/') return "absolute path";
+    if (memchr(path, '\\', length)) return "backslash";
+    if (memchr(path, '\0', length)) return "NUL byte";
+
     size_t start = 0;
     for (size_t i = 0; i <= length; i++) {
         if (i == length || path[i] == '/') {
             size_t part = i - start;
-            if (!part || (part == 1 && path[start] == '.') ||
-                (part == 2 && path[start] == '.' && path[start + 1] == '.')) return 0;
-            /* Match studio.write_studio_manifest.safe_resource_path: POSIX permits colons and control bytes
-             * in filenames, while component checks above still reject traversal. */
+            if (!part) return "empty path segment";
+            if (part == 1 && path[start] == '.') return "dot path segment";
+            if (part == 2 && path[start] == '.' && path[start + 1] == '.')
+                return "parent traversal";
             start = i + 1;
         }
     }
-    return 1;
+    return NULL;
+}
+
+static void escape_archive_path(char *output, size_t capacity,
+                                const char *path, size_t length) {
+    static const char hex[] = "0123456789abcdef";
+    if (!capacity) return;
+    size_t used = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char byte = (unsigned char)path[i];
+        size_t needed = byte >= 0x20 && byte <= 0x7e && byte != '\\' ? 1 : 4;
+        if (used + needed >= capacity) {
+            if (capacity - used > 3) {
+                memcpy(output + used, "...", 3);
+                used += 3;
+            }
+            break;
+        }
+        if (needed == 1) {
+            output[used++] = (char)byte;
+        } else {
+            output[used++] = '\\';
+            output[used++] = 'x';
+            output[used++] = hex[byte >> 4];
+            output[used++] = hex[byte & 0x0f];
+        }
+    }
+    output[used] = '\0';
 }
 
 static int write_all(int fd, const unsigned char *data, size_t length) {
@@ -314,10 +344,16 @@ int studpad_extract_resources_zip(const char *zip_path, const char *destination,
             free(name);
             continue;
         }
-        if (!safe_relative_path(relative, relative_length)) {
+        const char *unsafe_reason = unsafe_relative_path_reason(relative, relative_length);
+        if (unsafe_reason) {
+            char display_path[160];
+            escape_archive_path(display_path, sizeof(display_path), relative, relative_length);
+            int result = zip_error(error, error_capacity,
+                                   "unsafe Studio resource path at ZIP entry %u (%s): %s",
+                                   (unsigned int)index, unsafe_reason, display_path);
             free(name);
             fclose(archive);
-            return zip_error(error, error_capacity, "unsafe Studio resource path");
+            return result;
         }
         unsigned int file_mode = (attributes >> 16) & 0170000u;
         if (file_mode == 0120000u || (file_mode && file_mode != 0100000u &&

@@ -91,6 +91,8 @@ class ZipResourceTests(unittest.TestCase):
         )
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parent traversal", result.stderr)
+        self.assertIn("../../../../escape.txt", result.stderr)
         self.assertFalse((Path(directory) / "escape.txt").exists())
 
     def test_rejects_symlinks_in_resource_tree(self):

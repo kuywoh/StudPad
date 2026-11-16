@@ -472,6 +472,8 @@ static void crash_signal(int sig) {
             gProgressView.hidden = YES;
             gProgressLabel.hidden = YES;
             if (installError) {
+                studpad_log("Studio setup failed: %s",
+                            installError.localizedDescription.UTF8String ?: "unknown error");
                 gStatusLabel.text = [@"Studio setup failed: " stringByAppendingString:installError.localizedDescription];
                 UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Studio setup failed"
                     message:installError.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
@@ -599,6 +601,13 @@ static void crash_signal(int sig) {
 @end
 
 @implementation StudPadAppDelegate
+- (BOOL)application:(UIApplication *)application
+        didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)launchOptions {
+    (void)application;
+    (void)launchOptions;
+    studpad_log("StudPad build 43 launched");
+    return YES;
+}
 @end
 
 @interface StudPadSceneDelegate : UIResponder <UIWindowSceneDelegate>

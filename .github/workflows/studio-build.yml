@@ -70,6 +70,16 @@ jobs:
           chmod +x studio/build.sh recon/fetch_studio.sh
           studio/build.sh fetch 2>&1 | tee -a .work-build.log
 
+      - name: Exercise the iPad ZIP extractor against the official Studio package
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Iapp app/zip_resources.c tools/zip_resources_cli.c -lz -o .work/zip_resources_cli
+          app_path="$(sed -n 's/^app=//p' .work/studio/fetch/fetch.txt)"
+          app_name="${app_path##*/}"
+          destination="$(mktemp -d "$RUNNER_TEMP/studpad-resource-extract.XXXXXX")"
+          .work/zip_resources_cli .work/studio/fetch/studio.zip "$destination" "$app_name"
+          echo "Official Studio resource extraction passed for $app_name."
+
       - name: Stage the guest, Qt and the plugins
         run: studio/build.sh stage 2>&1 | tee -a .work-build.log
 

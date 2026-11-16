@@ -207,6 +207,11 @@ def main() -> int:
     own_exports: set[str] = set()
     for path in args.have_object:
         own_exports |= exports(path)
+    # Symbols another shipped image exports (Studio -> QtCore, QtGui -> QtCore, ...) are not
+    # missing; they are not the shim's either, so they are tracked separately from shim_have.
+    shipped_exports: set[str] = set()
+    for path in args.shipped:
+        shipped_exports |= exports(path)
     ios_all = sdk_symbols(args.sdk)
     reexports = sorted(set(REEXPORTS) | set(args.reexport))
     ios_reexported = framework_symbols(args.sdk, reexports)
@@ -265,13 +270,22 @@ def main() -> int:
 
     shim_have = own_exports | ios_reexported | absorbed_exported
     stubs_shim = {s for s in shim_bound if s not in shim_have}
-    stubs_device = {s for s in device_bound if s not in ios_all and s not in shim_have}
+    stubs_device = {
+        s
+        for s in device_bound
+        if s not in ios_all and s not in shim_have and s not in shipped_exports
+    }
 
     # A library is absorbed when it has at least one symbol iOS does not export. Rerouting single
     # symbols is not possible: a bind stream may set one dylib ordinal for a whole run of symbols, so
     # rewriting it would silently move symbols that do exist (malloc, free, cos) onto the shim.
     absorb_libraries = sorted(
-        {library for symbol in stubs_device for library in device_libraries.get(symbol, ())}
+        {
+            library
+            for symbol in stubs_device
+            for library in device_libraries.get(symbol, ())
+            if library.startswith("/")
+        }
     )
     if args.absorb_out:
         with open(args.absorb_out, "w", encoding="utf-8") as f:

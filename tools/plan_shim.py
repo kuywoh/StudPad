@@ -257,6 +257,21 @@ def main() -> int:
         ]
     absorbed_exported: set[str] = set()
     reexport_flags: list[str] = []
+
+    # NSObject/NSProxy and the ObjC runtime live in libobjc. Some images bind them through the shim
+    # (their library's re-export chain), and a stub cannot be a class, so the shim re-exports the
+    # real libobjc and dyld resolves the classrefs to it.
+    objc_reexport_flags: list[str] = []
+    for name in ("libobjc.tbd", "libobjc.A.tbd"):
+        tbd = os.path.join(args.sdk, "usr/lib", name)
+        if not os.path.exists(tbd):
+            continue
+        with open(tbd, "r", encoding="utf-8", errors="replace") as f:
+            absorbed_exported |= tbd_symbols(f.read())
+        objc_reexport_flags.append("-Wl,-reexport_library," + tbd)
+        break
+    if not objc_reexport_flags:
+        print("  warning: no libobjc stub in the SDK; NSObject classrefs would not resolve")
     for library in absorbed:
         tbd = tbd_for(library, args.sdk)
         if not tbd:
@@ -299,7 +314,7 @@ def main() -> int:
             for item in ("-framework", name, "-Wl,-reexport_framework," + name)
         ]
         with open(args.reexport_flags, "w", encoding="utf-8") as f:
-            for item in flags + reexport_flags:
+            for item in flags + objc_reexport_flags + reexport_flags:
                 f.write(item + "\n")
 
     # NSObject and NSProxy come from libobjc and are present on every iOS process. Never reroute

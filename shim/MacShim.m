@@ -679,6 +679,7 @@ static UIWindowScene *ms_active_scene(void) {
     id _msMainMenu;
     BOOL _msShouldTerminate;
     BOOL _msActive;
+    BOOL _msFinishedLaunching;
 }
 - (id)ms_lastWindow;
 @end
@@ -706,6 +707,8 @@ static UIWindowScene *ms_active_scene(void) {
 - (id)delegate { return _msDelegate; }
 
 - (void)finishLaunching {
+    if (_msFinishedLaunching) return;
+    _msFinishedLaunching = YES;
     studpad_log("[shim] finishLaunching");
     // Qt registers for input and screen changes from the delegate's
     // applicationDidFinishLaunching, exactly as on macOS. Skipping it is why a shimmed app gets no
@@ -735,6 +738,10 @@ static UIWindowScene *ms_active_scene(void) {
 - (id)nextEventMatchingMask:(unsigned long)mask untilDate:(id)date inMode:(id)mode
                     dequeue:(BOOL)dequeue {
     (void)mask; (void)date; (void)mode; (void)dequeue;
+    // AppKit completes the launch before the first event. A Qt main never calls -run or
+    // NSApplicationMain, so without this Qt's delegate would never hear about it and input and
+    // activation setup would be missing.
+    [self finishLaunching];
     ms_pump(0.01);
     return nil;
 }

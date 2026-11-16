@@ -33,6 +33,11 @@ static void *hash_on_small_stack(void *context) {
     return NULL;
 }
 
+static void fail_test(const char *message, const char *path) {
+    if (path) unlink(path);
+    fputs(message, stderr);
+}
+
 int main(void) {
     char path[] = "/tmp/studpad-sha256-XXXXXX";
     int fd = mkstemp(path);
@@ -44,19 +49,22 @@ int main(void) {
     unsigned char *contents = malloc(TEST_BYTES);
     if (!contents) {
         close(fd);
-        unlink(path);
-        fputs("could not allocate test contents\n", stderr);
+        fail_test("could not allocate test contents\n", path);
         return 1;
     }
     for (size_t i = 0; i < TEST_BYTES; i++) contents[i] = (unsigned char)(i * 31u + 7u);
 
     FILE *output = fdopen(fd, "wb");
-    if (!output || fwrite(contents, 1, TEST_BYTES, output) != TEST_BYTES || fclose(output) != 0) {
-        if (output) fclose(output);
-        else close(fd);
+    int write_failed = output == NULL;
+    if (output) {
+        if (fwrite(contents, 1, TEST_BYTES, output) != TEST_BYTES) write_failed = 1;
+        if (fclose(output) != 0) write_failed = 1;
+    } else {
+        close(fd);
+    }
+    if (write_failed) {
         free(contents);
-        unlink(path);
-        fputs("could not write test file\n", stderr);
+        fail_test("could not write test file\n", path);
         return 1;
     }
 
@@ -69,18 +77,23 @@ int main(void) {
     HashRequest request = {.path = path, .result = -1, .actual = {0}};
     pthread_attr_t attributes;
     pthread_t thread;
-    if (pthread_attr_init(&attributes) != 0 ||
-        pthread_attr_setstacksize(&attributes, 512u * 1024u) != 0 ||
-        pthread_create(&thread, &attributes, hash_on_small_stack, &request) != 0) {
+    if (pthread_attr_init(&attributes) != 0) {
+        fail_test("could not initialize small-stack test\n", path);
+        return 1;
+    }
+    if (pthread_attr_setstacksize(&attributes, 512u * 1024u) != 0) {
         pthread_attr_destroy(&attributes);
-        unlink(path);
-        fputs("could not start small-stack hash test\n", stderr);
+        fail_test("could not set small hash-thread stack\n", path);
+        return 1;
+    }
+    if (pthread_create(&thread, &attributes, hash_on_small_stack, &request) != 0) {
+        pthread_attr_destroy(&attributes);
+        fail_test("could not start small-stack hash test\n", path);
         return 1;
     }
     pthread_attr_destroy(&attributes);
     if (pthread_join(thread, NULL) != 0) {
-        unlink(path);
-        fputs("could not join small-stack hash test\n", stderr);
+        fail_test("could not join small-stack hash test\n", path);
         return 1;
     }
     unlink(path);

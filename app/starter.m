@@ -7,6 +7,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <CoreFoundation/CoreFoundation.h>
 #include <execinfo.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -30,6 +31,27 @@ static UILabel *gProgressLabel;
 static UIProgressView *gProgressView;
 static UIButton *gDownloadButton;
 static UIButton *gLaunchButton;
+
+static NSDictionary *read_dictionary_plist(NSString *path) {
+    if (path.length == 0) return nil;
+    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault,
+        (__bridge CFStringRef)path, kCFURLPOSIXPathStyle, false);
+    if (!url) return nil;
+    CFDataRef data = CFDataCreateWithContentsOfURL(kCFAllocatorDefault, url);
+    CFRelease(url);
+    if (!data) return nil;
+    CFErrorRef error = NULL;
+    CFPropertyListRef value = CFPropertyListCreateWithData(
+        kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
+    if (error) CFRelease(error);
+    if (!value) return nil;
+    if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {
+        CFRelease(value);
+        return nil;
+    }
+    return CFBridgingRelease(value);
+}
 
 static void host_log(const char *line) {
     if (!gText) gText = [NSMutableString new];
@@ -104,7 +126,7 @@ static void crash_signal(int sig) {
     self.view.backgroundColor = [UIColor colorWithRed:0.055 green:0.07 blue:0.1 alpha:1];
 
     NSString *manifestPath = [[NSBundle mainBundle] pathForResource:@"StudioPackage" ofType:@"plist"];
-    self.packageManifest = manifestPath ? [NSDictionary dictionaryWithContentsOfFile:manifestPath] : nil;
+    self.packageManifest = manifestPath ? read_dictionary_plist(manifestPath) : nil;
     NSString *urlText = self.packageManifest[@"package_url"];
     NSURL *url = [NSURL URLWithString:urlText ?: @""];
     if ([url.scheme isEqualToString:@"https"] &&

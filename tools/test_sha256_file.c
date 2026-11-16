@@ -104,9 +104,7 @@ int main(void) {
         return 1;
     }
 
-    char missing[] = "/tmp/studpad-sha256-missing";
-    unlink(missing);
-    if (studpad_sha256_file(missing, request.actual) == 0) {
+    if (studpad_sha256_file(path, request.actual) == 0) {
         fputs("missing-file hash unexpectedly succeeded\n", stderr);
         return 1;
     }

@@ -35,18 +35,18 @@ class ZipResourceTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def run_extractor(self, entries):
-        with tempfile.TemporaryDirectory() as directory:
-            archive = Path(directory) / "studio.zip"
-            destination = Path(directory) / "resources"
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
-                for info, data in entries:
-                    output.writestr(info, data)
-            result = subprocess.run(
-                [str(self.executable), str(archive), str(destination), "RobloxStudio.app"],
-                capture_output=True,
-                text=True,
-            )
-            return directory, destination, result
+        directory = tempfile.mkdtemp()
+        archive = Path(directory) / "studio.zip"
+        destination = Path(directory) / "resources"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            for info, data in entries:
+                output.writestr(info, data)
+        result = subprocess.run(
+            [str(self.executable), str(archive), str(destination), "RobloxStudio.app"],
+            capture_output=True,
+            text=True,
+        )
+        return directory, destination, result
 
     def test_extracts_only_resources_and_verifies_files(self):
         directory, destination, result = self.run_extractor(

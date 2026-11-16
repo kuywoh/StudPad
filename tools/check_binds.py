@@ -67,7 +67,7 @@ def tbd_symbols(text: str) -> set[str]:
             continue
         if stripped.startswith("- "):
             item = stripped[2:].strip()
-            if re.match(r"^[a-z-]+:\\s", item) or item.endswith(":"):
+            if re.match(r"^[a-z-]+:", item) or item.endswith(":"):
                 section = None
             elif section:
                 _add_tbd_value(section, item, found)

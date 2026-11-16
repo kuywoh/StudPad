@@ -1143,6 +1143,7 @@ static UIWindowScene *ms_active_scene(void) {
     BOOL _msActive;
     BOOL _msFinishedLaunching;
 }
+- (NSWindow *)modalWindow;
 - (id)ms_lastWindow;
 @end
 
@@ -1237,6 +1238,9 @@ NSApplication *NSApp = nil;
         return gWindows.count ? [gWindows copy] : @[];
     }
 }
+// AppKit reports no active modal window until a modal session is entered. The shim does
+// not run modal sessions yet, so nil is the correct value during Studio's launch checks.
+- (NSWindow *)modalWindow { return nil; }
 - (id)keyWindow { return [self ms_lastWindow]; }
 - (id)mainWindow { return [self ms_lastWindow]; }
 - (id)windowWithWindowNumber:(long)number {

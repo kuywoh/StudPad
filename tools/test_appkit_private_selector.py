@@ -23,6 +23,20 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
             ),
         )
 
+    def test_nsapplication_reports_no_active_modal_window_at_launch(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("@implementation NSApplication")
+        end = source.index("\\n@end", start)
+        implementation = source[start:end]
+
+        self.assertIn("- (NSWindow *)modalWindow;", source)
+        self.assertRegex(
+            implementation,
+            re.compile(r"-\\s*\\(NSWindow \\*\\)\\s*modalWindow\\s*\\{\\s*return nil;\\s*\\}"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

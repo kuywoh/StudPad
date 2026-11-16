@@ -10,6 +10,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
@@ -17,6 +18,7 @@
 #include <stdio.h>
 #import "MacShim.h"
 #import "zip_resources.h"
+#import "sha256_file.h"
 
 static UITextView *gLogView;
 static UIButton *gLogButton;
@@ -206,9 +208,11 @@ static void crash_signal(int sig) {
     [scroll addSubview:stack];
     NSLayoutConstraint *stackWidth = [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor
                                                                       constant:-44];
-    stackWidth.priority = UILayoutPriorityDefaultHigh;
+    stackWidth.priority = UILayoutPriorityRequired - 1;
     [NSLayoutConstraint activateConstraints:@[
         [stack.centerXAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:22],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-22],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:28],
         [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-28],
         stackWidth,
@@ -299,6 +303,9 @@ static void crash_signal(int sig) {
     [button setTitle:title forState:UIControlStateNormal];
     [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    button.titleLabel.numberOfLines = 0;
+    button.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    button.titleLabel.textAlignment = NSTextAlignmentCenter;
     [button.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
     [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
     return button;
@@ -479,30 +486,15 @@ static void crash_signal(int sig) {
 }
 
 - (NSString *)sha256ForFile:(NSURL *)url error:(NSError **)error {
-    FILE *input = fopen(url.fileSystemRepresentation, "rb");
-    if (!input) {
-        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
-            userInfo:@{NSLocalizedDescriptionKey:@"Could not read the downloaded Studio package."}];
+    char digest[STUDPAD_SHA256_HEX_LENGTH];
+    if (studpad_sha256_file(url.fileSystemRepresentation, digest) != 0) {
+        int code = errno ? errno : EIO;
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:code
+            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:
+                @"Could not hash the downloaded Studio package: %s", strerror(code)]}];
         return nil;
     }
-    CC_SHA256_CTX context;
-    CC_SHA256_Init(&context);
-    unsigned char buffer[1024 * 1024];
-    size_t count;
-    while ((count = fread(buffer, 1, sizeof(buffer), input)) > 0)
-        CC_SHA256_Update(&context, buffer, (CC_LONG)count);
-    BOOL readFailed = ferror(input);
-    fclose(input);
-    if (readFailed) {
-        if (error) *error = [NSError errorWithDomain:@"StudPadDownload" code:4
-            userInfo:@{NSLocalizedDescriptionKey:@"Could not read the complete Studio package."}];
-        return nil;
-    }
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_Final(digest, &context);
-    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
-    for (NSUInteger i = 0; i < sizeof(digest); i++) [hex appendFormat:@"%02x", digest[i]];
-    return hex;
+    return [NSString stringWithUTF8String:digest];
 }
 
 - (void)launchStudio:(UIButton *)sender {

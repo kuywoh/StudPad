@@ -74,6 +74,7 @@ SHIM_FRAMEWORKS = {
     "ColorSync",
     "IOKit",
     "OpenGL",
+    "AudioUnit",
 }
 # dylibs that are not part of iOS (the shim provides offline/no-op versions)
 SHIM_DYLIBS = {"/usr/lib/libcups.2.dylib", "/usr/lib/libcups.dylib"}

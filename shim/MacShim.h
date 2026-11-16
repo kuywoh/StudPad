@@ -35,6 +35,7 @@ void studpad_guest_start(void);
 void studpad_host_ready(void *host_view, void *spinner);
 void studpad_set_studio_launch_path(const char *path);
 int studpad_debugger_attached(void);
+int studpad_jit_enabled(void);
 int studpad_increased_memory_enabled(void);
 void studpad_present_view(void *view);
 void studpad_set_log_overlay(void *view);

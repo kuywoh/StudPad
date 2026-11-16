@@ -1223,12 +1223,25 @@ static int ms_debugger_attached(void) {
     return (info.kp_proc.p_flag & P_TRACED) ? 1 : 0;
 }
 
+static int ms_jit_enabled(void) {
+    typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);
+    CSOps csops = (CSOps)dlsym(RTLD_DEFAULT, "csops");
+    if (!csops) return -1;
+    uint32_t flags = 0;
+    /* Match Henge's CS_OPS_STATUS check; CS_DEBUGGED persists after a debugger detaches. */
+    if (csops(getpid(), 0u, &flags, sizeof(flags)) != 0) return -1;
+    return (flags & UINT32_C(0x10000000)) ? 1 : 0;
+}
+
 static void ms_log_runtime_environment(void) {
     int attached = ms_debugger_attached();
-    studpad_log("GetMoreRam increased-memory-limit entitlement: %s",
+    int jitEnabled = ms_jit_enabled();
+    studpad_log("GetMoreRam entitlement check: %s",
                 studpad_increased_memory_enabled() ? "active" : "not present");
-    studpad_log("debugger attached: %s (StikDebug)",
+    studpad_log("debugger currently tracing (P_TRACED): %s",
                 attached == 1 ? "yes" : attached == 0 ? "no" : "unknown");
+    studpad_log("JIT check (CS_DEBUGGED): %s",
+                jitEnabled == 1 ? "enabled" : jitEnabled == 0 ? "not detected" : "unavailable");
 
     void *probe = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -1258,6 +1271,10 @@ void studpad_set_studio_launch_path(const char *path) {
 
 int studpad_debugger_attached(void) {
     return ms_debugger_attached();
+}
+
+int studpad_jit_enabled(void) {
+    return ms_jit_enabled();
 }
 
 int studpad_increased_memory_enabled(void) {

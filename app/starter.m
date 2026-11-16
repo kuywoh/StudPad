@@ -283,7 +283,7 @@ static void crash_signal(int sig) {
     [stack addArrangedSubview:[self buttonWithTitle:@"Enable JIT with StikDebug" selector:@selector(showStikDebug:) primary:NO]];
 
     UILabel *note = [UILabel new];
-    note.text = @"JIT is optional for the current Studio build. The button hands this running app to StikDebug; it does not install StikDebug or change the app's signing profile.";
+    note.text = @"JIT is optional for this Studio build. The checker reads iOS's CS_DEBUGGED process flag; a successful memory mapping alone does not prove JIT is enabled.";
     note.textColor = [UIColor colorWithWhite:0.65 alpha:1];
     note.font = [UIFont systemFontOfSize:13];
     note.numberOfLines = 0;
@@ -332,11 +332,14 @@ static void crash_signal(int sig) {
     }
 
     gMemoryStatusLabel.text = studpad_increased_memory_enabled()
-        ? @"GetMoreRam: increased memory limit is active in this installed signing profile."
-        : @"GetMoreRam: not active in this install. Add the capability in GetMoreRam, then refresh or reinstall StudPad in SideStore.";
-    gJitStatusLabel.text = studpad_debugger_attached() == 1
-        ? @"StikDebug: a debugger is attached to StudPad."
-        : @"StikDebug: no debugger is attached. Set it up only if Studio reports an executable-memory problem.";
+        ? @"GetMoreRam check: ACTIVE. This install has the Increased Memory Limit entitlement."
+        : @"GetMoreRam check: NOT ACTIVE. Add Increased Memory Limit to this app in GetMoreRam, then refresh or reinstall StudPad in SideStore.";
+    int jitEnabled = studpad_jit_enabled();
+    gJitStatusLabel.text = jitEnabled == 1
+        ? @"JIT check: ENABLED. iOS reports CS_DEBUGGED for StudPad (the same process flag Henge checks)."
+        : jitEnabled == 0
+            ? @"JIT check: NOT DETECTED. StikDebug has not marked this StudPad process; use its per-app Enable JIT action/script."
+            : @"JIT check: UNKNOWN. iOS did not provide the CS_DEBUGGED process status.";
 }
 
 - (void)downloadStudio:(UIButton *)sender {

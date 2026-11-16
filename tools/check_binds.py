@@ -330,8 +330,13 @@ def tbd_for(library: str, sdk: str) -> str | None:
         return None
     m = re.match(r"^/usr/lib/([A-Za-z0-9_.+]+?)(?:\.dylib)$", library)
     if m:
-        candidate = os.path.join(sdk, "usr/lib", f"{m.group(1)}.tbd")
-        return candidate if os.path.exists(candidate) else None
+        name = m.group(1)
+        # libc++.1.dylib is shipped as libc++.tbd, libSystem.B.dylib as libSystem.B.tbd.
+        for candidate_name in (name, re.sub(r"\.[0-9]+$", "", name)):
+            candidate = os.path.join(sdk, "usr/lib", f"{candidate_name}.tbd")
+            if os.path.exists(candidate):
+                return candidate
+        return None
     return None
 
 

@@ -189,11 +189,18 @@ def map_rpath(path: str) -> str | None:
     return None
 
 
-def rewrite_paths(data: bytearray) -> list[str]:
+def rewrite_paths(data: bytearray, absorb: set[str] | None = None) -> list[str]:
     log = []
     for off, cmd, size in commands(data):
         if cmd in DYLIB_CMDS or cmd == LC_ID_DYLIB:
             name_off, old = dylib_name(data, off, size)
+            if absorb and old in absorb:
+                # The whole library goes behind the shim, which re-exports it: the real symbols keep
+                # resolving to the real implementation, and only the ones iOS lacks get a stub.
+                if old != SHIM:
+                    set_string(data, off, size, name_off, SHIM)
+                    log.append(f"{old} -> {SHIM} (absorbed)")
+                continue
             new = map_install_name(old)
             if new and new != old:
                 set_string(data, off, size, name_off, new)
@@ -599,6 +606,11 @@ def main() -> int:
     ap.add_argument(
         "--reroute", metavar="FILE", help="symbols (one per line) to bind to the shim"
     )
+    ap.add_argument(
+        "--absorb",
+        metavar="FILE",
+        help="libraries (one per line) whose load commands should point at the shim",
+    )
     args = ap.parse_args()
 
     if args.info:
@@ -607,9 +619,17 @@ def main() -> int:
     if not (args.src and args.dst):
         ap.error("need SRC DST")
 
+    absorb = None
+    if args.absorb:
+        absorb = {
+            line.strip()
+            for line in open(args.absorb, encoding="utf-8")
+            if line.strip() and not line.startswith("#")
+        }
+
     data = thin_arm64(args.src)
     log = set_platform(data, args.minos, args.sdk)
-    log += rewrite_paths(data)
+    log += rewrite_paths(data, absorb)
     log += make_loadable(data)
     log += dedupe_dylibs(data)
     if args.reroute:

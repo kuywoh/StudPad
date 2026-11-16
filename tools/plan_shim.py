@@ -41,7 +41,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_binds import binds, exports, tbd_symbols  # noqa: E402  (same tool directory)
+from check_binds import binds, exports, tbd_for, tbd_symbols  # noqa: E402  (same tool directory)
 
 # Clang refuses to redeclare these, and they are compiler builtins no image should bind by name.
 SKIP_STUBS = re.compile(r"^__(atomic|builtin)")
@@ -198,6 +198,9 @@ def main() -> int:
     ap.add_argument("--objc", required=True)
     ap.add_argument("--reroute", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--absorb", help="libraries already pointed at the shim, one path per line")
+    ap.add_argument("--absorb-out", help="libraries whose imports the shim must absorb")
+    ap.add_argument("--reexport-flags", help="linker flags for the shim's re-exports, one per line")
     args = ap.parse_args()
 
     images = [args.guest] + list(args.shipped)
@@ -236,9 +239,50 @@ def main() -> int:
     # A symbol the shim must supply: bound to it and not exported by the shim's code, its re-exported
     # frameworks, or anything it links. `--shipped` is not part of this: another dylib exporting a
     # name does not make the shim export it, because binds are resolved against the named library.
-    shim_have = own_exports | ios_reexported
+    # Libraries the previous pass found missing symbols in are already pointed at the shim, and the
+    # shim re-exports them: their real symbols stay real, so only what they genuinely lack is stubbed.
+    absorbed: list[str] = []
+    if args.absorb and os.path.exists(args.absorb):
+        absorbed = [
+            line.strip()
+            for line in open(args.absorb, encoding="utf-8")
+            if line.strip() and not line.startswith("#")
+        ]
+    absorbed_exported: set[str] = set()
+    reexport_flags: list[str] = []
+    for library in absorbed:
+        tbd = tbd_for(library, args.sdk)
+        if not tbd:
+            print(f"  warning: no SDK stub for absorbed {library}: its symbols become stubs")
+            continue
+        with open(tbd, "r", encoding="utf-8", errors="replace") as f:
+            absorbed_exported |= tbd_symbols(f.read())
+        reexport_flags.append("-Wl,-reexport_library," + tbd)
+    if absorbed:
+        print(f"  re-exporting {len(absorbed)} absorbed libraries")
+
+    shim_have = own_exports | ios_reexported | absorbed_exported
     stubs_shim = {s for s in shim_bound if s not in shim_have}
     stubs_device = {s for s in device_bound if s not in ios_all and s not in shim_have}
+
+    # A library is absorbed when it has at least one symbol iOS does not export. Rerouting single
+    # symbols is not possible: a bind stream may set one dylib ordinal for a whole run of symbols, so
+    # rewriting it would silently move symbols that do exist (malloc, free, cos) onto the shim.
+    absorb_libraries = sorted({library for symbol, library in device_bound if symbol in stubs_device})
+    if args.absorb_out:
+        with open(args.absorb_out, "w", encoding="utf-8") as f:
+            f.write("# libraries whose imports must be absorbed by libMacShim.dylib\n")
+            for library in absorb_libraries:
+                f.write(library + "\n")
+    if args.reexport_flags:
+        flags = [
+            item
+            for name in reexports
+            for item in ("-framework", name, "-Wl,-reexport_framework," + name)
+        ]
+        with open(args.reexport_flags, "w", encoding="utf-8") as f:
+            for item in flags + reexport_flags:
+                f.write(item + "\n")
 
     # NSObject and NSProxy come from libobjc and are present on every iOS process. Never reroute
     # them: a reroute would make them the shim's problem, and no stub can be the real class.
@@ -271,6 +315,9 @@ def main() -> int:
         f.write(f"bound to iOS libraries: {len(device_bound)}\n")
         f.write(f"missing via the shim: {len(stubs_shim)}\n")
         f.write(f"missing from the iOS SDK: {len(stubs_device)}\n")
+        f.write(f"absorbed libraries: {len(absorb_libraries)}\n")
+        for library in absorb_libraries:
+            f.write(f"  {library}\n")
         f.write(
             f"stubs: {len(stubs)} ({len(groups['functions'])} functions, "
             f"{len(groups['asm'])} aliased, {classes} classes, "

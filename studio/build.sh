@@ -12,7 +12,7 @@
 #   stage      copy the guest, Qt, helper dylibs and plugins into .work/studio/stage
 #   retarget1  rewrite the load commands of every staged image for iOS
 #   plan       compile the hand-written shim, then generate the stubs it is missing
-#   retarget2  bind the stubbed imports to the shim
+#   retarget2  point every library the shim must absorb at libMacShim.dylib
 #   link       link libMacShim.dylib
 #   host       build the UIKit host app
 #   check      refuse the build unless every shim-bound import is exported
@@ -230,16 +230,19 @@ plan() {
     --stubs "$WORK/stubs.c" \
     --objc "$WORK/stubs_objc.m" \
     --reroute "$WORK/reroute.txt" \
+    --absorb "$WORK/absorb.txt" \
+    --absorb-out "$WORK/absorb.txt" \
+    --reexport-flags "$WORK/link-reexports.txt" \
     --report "$WORK/shim-plan.txt"
 }
 
 retarget2() {
-  step "retarget pass 2: bind the stubbed imports to the shim"
+  step "retarget pass 2: put the libraries iOS is missing symbols from behind the shim"
   local binary
   for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/"*.dylib \
-    "$APP/Frameworks/PlugIns/"*/*.dylib; do
+    "$APP/Frameworks/PlugIns/"*/*.dylib "$APP/"*.dylib; do
     [ -f "$binary" ] || continue
-    retarget "$binary" "$binary.rerouted" --reroute "$WORK/reroute.txt"
+    retarget "$binary" "$binary.rerouted" --absorb "$WORK/absorb.txt"
     mv "$binary.rerouted" "$binary"
   done
 
@@ -265,21 +268,14 @@ link() {
   done
 
   step "link libMacShim.dylib"
-  local frameworks=(Foundation UIKit CoreFoundation CoreGraphics QuartzCore CoreText ImageIO
-    Security Metal GameController UniformTypeIdentifiers AudioToolbox)
-  local framework known linked=()
-  if [ -f "$WORK/reexports.txt" ]; then
-    while IFS= read -r framework; do
-      [ -n "$framework" ] || continue
-      for known in "${frameworks[@]}"; do
-        [ "$known" = "$framework" ] && continue 2
-      done
-      frameworks+=("$framework")
-    done < "$WORK/reexports.txt"
-  fi
-  for framework in "${frameworks[@]}"; do
-    linked+=(-framework "$framework" -Wl,-reexport_framework,"$framework")
-  done
+  # The plan writes the exact -framework/-reexport_library set: the iOS frameworks the images link
+  # plus every library it had to absorb. Keeping the list in one place is what makes plan and link
+  # agree about what the shim exports.
+  local linked=() token
+  while IFS= read -r token; do
+    [ -n "$token" ] && linked+=("$token")
+  done < "$WORK/link-reexports.txt"
+  [ "${#linked[@]}" -gt 0 ] || { echo "no re-export flags from the plan" >&2; return 1; }
   guard 600 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -dynamiclib \
     -install_name @rpath/libMacShim.dylib \
     -compatibility_version 9999.0.0 -current_version 9999.0.0 \

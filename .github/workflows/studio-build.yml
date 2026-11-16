@@ -32,7 +32,12 @@ env:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
+    # `shell: bash` is `bash -eo pipefail`, so a failing stage inside `build.sh | tee` fails the step
+    # instead of being masked by tee's exit status.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +56,6 @@ jobs:
 
       - name: Fetch the official Studio package
         run: |
-          set -o pipefail
           chmod +x studio/build.sh recon/fetch_studio.sh
           studio/build.sh fetch 2>&1 | tee -a .work-build.log
 

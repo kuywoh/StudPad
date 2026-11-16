@@ -50,24 +50,187 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
+MH_MAGIC_64 = 0xFEEDFACF
+MH_MAGIC = 0xFEEDFACE
+FAT_MAGIC_BE = 0xCAFEBABE
+LC_SEGMENT_64 = 0x19
+LC_SYMTAB = 0x2
+LC_DYLD_INFO = 0x22
+LC_DYLD_INFO_ONLY = 0x80000022
+LC_DYLD_CHAINED_FIXUPS = 0x80000034
+
+
+def _thin(path: str) -> bytes:
+    data = open(path, "rb").read()
+    if len(data) >= 8 and struct.unpack_from(">I", data, 0)[0] == FAT_MAGIC_BE:
+        count = struct.unpack_from(">I", data, 4)[0]
+        for i in range(count):
+            cpu, _sub, off, size, _align = struct.unpack_from(">IIIII", data, 8 + 20 * i)
+            if cpu == 0x0100000C:
+                return data[off : off + size]
+        return b""
+    return data
+
+
+def _commands(data: bytes) -> list[tuple[int, int, int]]:
+    magic, _cpu, _sub, _ftype, ncmds, _sz, _flags, _res = struct.unpack_from("<IIIIIIII", data, 0)
+    if magic != MH_MAGIC_64:
+        return []
+    out = []
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, off)
+        if size < 8:
+            break
+        out.append((off, cmd, size))
+        off += size
+    return out
+
+
+def _cstr(data: bytes, start: int, limit: int) -> str:
+    nul = data.find(b"\0", start, limit)
+    if nul < 0:
+        nul = limit
+    return data[start:nul].decode("utf-8", "replace")
+
+
+def _dylibs(data: bytes) -> list[str]:
+    libs = []
+    for off, cmd, size in _commands(data):
+        if cmd in DYLIB_CMDS:
+            name_off = struct.unpack_from("<I", data, off + 8)[0]
+            libs.append(_cstr(data, off + name_off, off + size))
+    return libs
+
+
+def _uleb(data: bytes, i: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        b = data[i]
+        i += 1
+        value |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return value, i
+
+
+def _sleb(data: bytes, i: int) -> int:
+    _value, i = _uleb(data, i)
+    return i
+
+
+def _bind_stream(data: bytes, off: int, size: int, libs: list[str], out: set) -> None:
+    """Walk a dyld-info bind stream and record (symbol, library) per DO_BIND."""
+    if not size:
+        return
+    i, end = off, off + size
+    ordinal = 0
+    symbol = None
+    while i < end:
+        raw = data[i]
+        op, imm = raw & 0xF0, raw & 0x0F
+        i += 1
+        if op == 0x00:  # DONE
+            ordinal, symbol = 0, None
+        elif op == 0x10:  # SET_DYLIB_ORDINAL_IMM
+            ordinal = imm
+        elif op == 0x20:  # SET_DYLIB_ORDINAL_ULEB
+            ordinal, i = _uleb(data, i)
+        elif op == 0x30:  # SET_DYLIB_SPECIAL_IMM
+            ordinal = 0 if imm == 0 else (imm | 0xF0) - 0x100
+        elif op == 0x40:  # SET_SYMBOL_TRAILING_FLAGS_IMM
+            nul = data.find(b"\0", i, end)
+            if nul < 0:
+                return
+            symbol = data[i:nul].decode("utf-8", "replace")
+            i = nul + 1
+        elif op == 0x50:  # SET_TYPE_IMM
+            pass
+        elif op == 0x60:  # SET_ADDEND_SLEB
+            i = _sleb(data, i)
+        elif op == 0x70:  # SET_SEGMENT_AND_OFFSET_ULEB
+            i = _uleb(data, i)[1]
+        elif op == 0x80:  # ADD_ADDR_ULEB
+            i = _uleb(data, i)[1]
+        elif op == 0x90:  # DO_BIND
+            _emit(symbol, ordinal, libs, out)
+        elif op == 0xA0:  # DO_BIND_ADD_ADDR_ULEB
+            _emit(symbol, ordinal, libs, out)
+            i = _uleb(data, i)[1]
+        elif op == 0xB0:  # DO_BIND_ADD_ADDR_IMM_SCALED
+            _emit(symbol, ordinal, libs, out)
+        elif op == 0xC0:  # DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+            _emit(symbol, ordinal, libs, out)
+            i = _uleb(data, i)[1]
+            i = _uleb(data, i)[1]
+        elif op == 0xD0:  # THREADED
+            if imm == 0:
+                i = _uleb(data, i)[1]
+            # APPLY (1) has no operand
+        else:
+            return  # unknown opcode: refuse this image rather than report a wrong table
+
+
+def _emit(symbol, ordinal: int, libs: list[str], out: set) -> None:
+    if not symbol:
+        return
+    if 1 <= ordinal <= len(libs):
+        out.add((symbol, libs[ordinal - 1]))
+    else:
+        out.add((symbol, "self" if ordinal == 0 else "special"))
+
+
+def _chained_pairs(data: bytes, off: int, libs: list[str], out: set) -> None:
+    _ver, _starts, imports_off, sym_off, count, fmt, symfmt = struct.unpack_from(
+        "<IIIIIII", data, off
+    )
+    if symfmt != 0 or fmt not in (1, 2, 3):
+        return
+    width = {1: 4, 2: 8, 3: 16}[fmt]
+    for i in range(count):
+        p = off + imports_off + i * width
+        if fmt == 3:
+            value = struct.unpack_from("<Q", data, p)[0]
+            ordinal, name_off = value & 0xFFFF, value >> 32
+        else:
+            value = struct.unpack_from("<I", data, p)[0]
+            ordinal, name_off = value & 0xFF, value >> 9
+        name = _cstr(data, off + sym_off + name_off, off + sym_off + name_off + 512)
+        if 1 <= ordinal <= len(libs):
+            out.add((name, libs[ordinal - 1]))
+        else:
+            out.add((name, "special"))
+
+
 def binds(path: str) -> list[tuple[str, str]] | None:
-    """Bound (symbol, library) pairs, or None if this Xcode has no working dyld_info."""
-    for tool in (["xcrun", "dyld_info", "-bind"], ["xcrun", "dyldinfo", "-bind"]):
-        for arch in (["-arch", "arm64"], []):
-            code, out = run(tool + arch + [path])
-            if code != 0 or not out.strip():
-                continue
-            pairs = []
-            for line in out.splitlines():
-                fields = line.split()
-                if len(fields) < 3 or not fields[0].startswith("0x"):
-                    continue
-                symbol, library = fields[1], fields[2]
-                if symbol.startswith("_"):
-                    pairs.append((symbol, library))
-            if pairs:
-                return pairs
-    return None
+    """Bound (symbol, library) pairs read straight from the image, or None if unreadable.
+
+    This deliberately does not shell out to `dyld_info`: several Xcode versions ship a dyld_info that
+    refuses these retargeted images, and silently falling back to "every import came from the
+    device" is what made an earlier build reroute Studio's own Qt imports into the shim.
+    """
+    try:
+        data = _thin(path)
+    except OSError:
+        return None
+    if not data:
+        return None
+    libs = _dylibs(data)
+    pairs: set[tuple[str, str]] = set()
+    saw_bind_info = False
+    for off, cmd, size in _commands(data):
+        if cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
+            saw_bind_info = True
+            fields = struct.unpack_from("<10I", data, off + 8)
+            for field, length in ((2, 3), (4, 5), (6, 7)):
+                _bind_stream(data, fields[field], fields[length], libs, pairs)
+        elif cmd == LC_DYLD_CHAINED_FIXUPS:
+            saw_bind_info = True
+            data_off = struct.unpack_from("<I", data, off + 8)[0]
+            _chained_pairs(data, data_off, libs, pairs)
+    if not saw_bind_info and libs:
+        return None
+    return sorted(pairs)
 
 
 def exports(path: str) -> set[str]:
@@ -180,13 +343,8 @@ def main() -> int:
                 stale.append(f"{os.path.relpath(path, args.app)}: {symbol} -> {library}")
 
     if unreadable:
-        print(
-            f"  warning: {unreadable} image(s) could not be read with dyld_info on this Xcode; "
-            "the bind check is incomplete"
-        )
-        if unreadable == len(images) - 1:
-            print("  warning: dyld_info unavailable, skipping the bind check")
-            return 0
+        print(f"ERROR: {unreadable} image(s) have no readable bind information")
+        return 1
 
     missing = {s: users for s, users in want.items() if s not in have}
     if stale:

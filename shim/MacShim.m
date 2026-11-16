@@ -29,10 +29,14 @@
 #import <fcntl.h>
 #import <execinfo.h>
 #import <signal.h>
+#import <errno.h>
 #import <stdarg.h>
 #import <stdlib.h>
 #import <string.h>
+#import <sys/mman.h>
+#import <sys/sysctl.h>
 #import <unistd.h>
+#import <os/proc.h>
 
 extern char **environ;
 
@@ -175,58 +179,101 @@ static void ms_pump(double seconds) {
 - (void)interpretKeyEvents:(id)events { (void)events; }
 @end
 
-@interface NSEvent : MSStubObject
+@interface NSEvent : MSStubObject {
+  @public
+    long _msType;
+    CGPoint _msLocation;
+    unsigned long _msFlags;
+    double _msTimestamp;
+    long _msWindowNumber;
+    unsigned short _msKeyCode;
+    NSString *_msCharacters;
+    long _msButtonNumber;
+    long _msClickCount;
+    float _msPressure;
+    id _msWindow;
+    double _msDeltaX, _msDeltaY, _msScrollingDeltaX, _msScrollingDeltaY;
+    short _msSubtype;
+}
 @end
 
 @implementation NSEvent
-+ (NSEvent *)ms_event {
-    static NSEvent *event = nil;
-    if (!event) event = [NSEvent new];
+
+// The host synthesises events from UITouch/UIKey; these are how it fills one in.
++ (NSEvent *)ms_make:(long)type location:(CGPoint)location window:(id)window {
+    NSEvent *event = [NSEvent new];
+    event->_msType = type;
+    event->_msLocation = location;
+    event->_msTimestamp = [NSDate timeIntervalSinceReferenceDate];
+    event->_msWindow = window;
+    event->_msWindowNumber = 1;
+    event->_msClickCount = 1;
     return event;
 }
+
 + (NSEvent *)mouseEventWithType:(long)type location:(CGPoint)location
                   modifierFlags:(unsigned long)flags timestamp:(double)timestamp
                    windowNumber:(long)number context:(id)context eventNumber:(long)eventNumber
                      clickCount:(long)clickCount pressure:(float)pressure {
-    (void)type; (void)location; (void)flags; (void)timestamp; (void)number; (void)context;
-    (void)eventNumber; (void)clickCount; (void)pressure;
-    return [NSEvent ms_event];
+    (void)context; (void)eventNumber;
+    NSEvent *event = [NSEvent ms_make:type location:location window:nil];
+    event->_msFlags = flags;
+    event->_msTimestamp = timestamp;
+    event->_msWindowNumber = number;
+    event->_msClickCount = clickCount;
+    event->_msPressure = pressure;
+    return event;
 }
 + (NSEvent *)keyEventWithType:(long)type location:(CGPoint)location
                 modifierFlags:(unsigned long)flags timestamp:(double)timestamp
                  windowNumber:(long)number context:(id)context characters:(id)characters
     charactersIgnoringModifiers:(id)raw isARepeat:(BOOL)isRepeat keyCode:(unsigned short)keyCode {
-    (void)type; (void)location; (void)flags; (void)timestamp; (void)number; (void)context;
-    (void)characters; (void)raw; (void)isRepeat; (void)keyCode;
-    return [NSEvent ms_event];
+    (void)context; (void)raw; (void)isRepeat;
+    NSEvent *event = [NSEvent ms_make:type location:location window:nil];
+    event->_msFlags = flags;
+    event->_msTimestamp = timestamp;
+    event->_msWindowNumber = number;
+    event->_msCharacters = [characters copy];
+    event->_msKeyCode = keyCode;
+    return event;
 }
 + (NSEvent *)otherEventWithType:(long)type location:(CGPoint)location
                   modifierFlags:(unsigned long)flags timestamp:(double)timestamp
                    windowNumber:(long)number context:(id)context subtype:(short)subtype
                           data1:(long)data1 data2:(long)data2 {
-    (void)type; (void)location; (void)flags; (void)timestamp; (void)number; (void)context;
-    (void)subtype; (void)data1; (void)data2;
-    return [NSEvent ms_event];
+    (void)context; (void)data1; (void)data2;
+    NSEvent *event = [NSEvent ms_make:type location:location window:nil];
+    event->_msFlags = flags;
+    event->_msTimestamp = timestamp;
+    event->_msWindowNumber = number;
+    event->_msSubtype = subtype;
+    return event;
 }
 + (double)doubleClickInterval { return 0.5; }
-- (long)type { return 0; }
-- (CGPoint)locationInWindow { return CGPointZero; }
-- (unsigned long)modifierFlags { return 0; }
-- (double)timestamp { return 0; }
-- (long)windowNumber { return 0; }
-- (unsigned short)keyCode { return 0; }
-- (id)characters { return @""; }
-- (id)charactersIgnoringModifiers { return @""; }
++ (double)keyRepeatDelay { return 0.5; }
++ (double)keyRepeatInterval { return 0.05; }
++ (unsigned long)modifierFlags { return 0; }
+- (long)type { return _msType; }
+- (CGPoint)locationInWindow { return _msLocation; }
+- (unsigned long)modifierFlags { return _msFlags; }
+- (double)timestamp { return _msTimestamp; }
+- (long)windowNumber { return _msWindowNumber; }
+- (unsigned short)keyCode { return _msKeyCode; }
+- (id)characters { return _msCharacters ? _msCharacters : @""; }
+- (id)charactersIgnoringModifiers { return _msCharacters ? _msCharacters : @""; }
 - (BOOL)isARepeat { return NO; }
-- (long)buttonNumber { return 0; }
-- (long)clickCount { return 1; }
-- (float)pressure { return 0; }
-- (double)deltaX { return 0; }
-- (double)deltaY { return 0; }
-- (double)scrollingDeltaX { return 0; }
-- (double)scrollingDeltaY { return 0; }
-- (short)subtype { return 0; }
-- (id)window { return nil; }
+- (long)buttonNumber { return _msButtonNumber; }
+- (long)clickCount { return _msClickCount; }
+- (float)pressure { return _msPressure; }
+- (double)deltaX { return _msDeltaX; }
+- (double)deltaY { return _msDeltaY; }
+- (double)scrollingDeltaX { return _msScrollingDeltaX; }
+- (double)scrollingDeltaY { return _msScrollingDeltaY; }
+- (BOOL)hasPreciseScrollingDeltas { return YES; }
+- (short)subtype { return _msSubtype; }
+- (id)window { return _msWindow; }
+- (id)associatedEventsMask { return nil; }
+- (id)trackingArea { return nil; }
 @end
 
 @interface NSScreen : MSStubObject
@@ -251,55 +298,56 @@ static void ms_pump(double seconds) {
 // NSView / NSWindow / NSApplication
 // ---------------------------------------------------------------------------------------------
 
-@interface NSView : NSResponder {
-  @public
-    CGRect _msFrame;
-    NSView *_msWindow;
-    NSMutableArray *_msSubviews;
-    unsigned long _msAutoresizing;
-    BOOL _msHidden;
-    BOOL _msWantsLayer;
-}
+// NSView is a real UIView, not a model object. Qt's cocoa platform plugin instantiates its own
+// QNSView, which subclasses NSView by name at load time: that makes every Studio window a UIView,
+// so UIKit delivers drawing and touches to Qt's own code paths instead of to a stub.
+@interface NSView : UIView <UIKeyInput>
 @end
 
 @implementation NSView
 
 - (id)initWithFrame:(CGRect)frame {
-    if ((self = [super init])) {
-        _msFrame = frame;
-        _msSubviews = [NSMutableArray new];
+    if ((self = [super initWithFrame:frame])) {
+        self.multipleTouchEnabled = YES;
+        self.opaque = YES;
+        self.backgroundColor = UIColor.blackColor;
+        UIPanGestureRecognizer *pan =
+            [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(ms_panned:)];
+        pan.minimumNumberOfTouches = 2;
+        pan.maximumNumberOfTouches = 2;
+        [self addGestureRecognizer:pan];
     }
     return self;
 }
 
 - (id)init { return [self initWithFrame:CGRectZero]; }
-- (CGRect)frame { return _msFrame; }
-- (void)setFrame:(CGRect)frame { _msFrame = frame; }
-- (void)setFrameSize:(CGSize)size { _msFrame.size = size; }
-- (void)setFrameOrigin:(CGPoint)origin { _msFrame.origin = origin; }
-- (CGRect)bounds { return CGRectMake(0, 0, _msFrame.size.width, _msFrame.size.height); }
-- (void)setBounds:(CGRect)bounds { (void)bounds; }
+- (void)setFrameSize:(CGSize)size {
+    CGRect frame = self.frame;
+    frame.size = size;
+    self.frame = frame;
+}
+- (void)setFrameOrigin:(CGPoint)origin {
+    CGRect frame = self.frame;
+    frame.origin = origin;
+    self.frame = frame;
+}
 - (CGRect)visibleRect { return self.bounds; }
 - (BOOL)isFlipped { return YES; }
 - (void)setFlipped:(BOOL)flipped { (void)flipped; }
-- (id)window { return _msWindow; }
-- (id)superview { return nil; }
-- (NSArray *)subviews { return _msSubviews; }
-- (void)addSubview:(id)view { if (view) [_msSubviews addObject:view]; }
-- (void)removeFromSuperview { }
-- (void)setHidden:(BOOL)hidden { _msHidden = hidden; }
-- (BOOL)isHidden { return _msHidden; }
-- (void)setNeedsDisplay:(BOOL)needs { (void)needs; }
-- (void)setNeedsDisplayInRect:(CGRect)rect { (void)rect; }
-- (void)display { }
+- (void)setBounds:(CGRect)bounds { (void)bounds; }
+- (void)setNeedsDisplay:(BOOL)needs {
+    if (needs) [self setNeedsDisplay];
+}
+- (void)setNeedsDisplayInRect:(CGRect)rect {
+    [self setNeedsDisplay];
+}
+- (void)display { [self setNeedsDisplay]; }
 - (void)displayIfNeeded { }
-- (void)drawRect:(CGRect)rect { (void)rect; }
 - (BOOL)wantsUpdateLayer { return NO; }
 - (void)updateLayer { }
-- (id)layer { return nil; }
 - (void)setLayer:(id)layer { (void)layer; }
-- (void)setWantsLayer:(BOOL)wants { _msWantsLayer = wants; }
-- (BOOL)wantsLayer { return _msWantsLayer; }
+- (void)setWantsLayer:(BOOL)wants { (void)wants; }
+- (BOOL)wantsLayer { return YES; }
 - (void)setLayerContentsRedrawPolicy:(long)policy { (void)policy; }
 - (CALayer *)makeBackingLayer { return [CALayer layer]; }
 - (void)setWantsBestResolutionOpenGLSurface:(BOOL)wants { (void)wants; }
@@ -308,16 +356,18 @@ static void ms_pump(double seconds) {
 - (CGRect)convertRect:(CGRect)rect toView:(id)view { (void)view; return rect; }
 - (CGPoint)convertPoint:(CGPoint)point fromView:(id)view { (void)view; return point; }
 - (CGPoint)convertPoint:(CGPoint)point toView:(id)view { (void)view; return point; }
-- (id)hitTest:(CGPoint)point { (void)point; return nil; }
+- (CGRect)convertRectFromBacking:(CGRect)rect { return rect; }
+- (CGRect)convertRectToBacking:(CGRect)rect { return rect; }
+- (id)hitTest:(CGPoint)point {
+    return CGRectContainsPoint(self.bounds, point) ? self : nil;
+}
 - (void)viewDidMoveToWindow { }
+- (void)viewWillMoveToWindow:(id)window { (void)window; }
 - (void)viewWillDraw { }
-- (void)layout { }
-- (void)setNeedsLayout { }
 - (BOOL)needsLayout { return NO; }
+- (void)setNeedsLayout { [super setNeedsLayout]; }
 - (void)layoutSubtreeIfNeeded { }
 - (double)backingScaleFactor { return (double)UIScreen.mainScreen.scale; }
-- (void)setAutoresizingMask:(unsigned long)mask { _msAutoresizing = mask; }
-- (unsigned long)autoresizingMask { return _msAutoresizing; }
 - (long)tag { return 0; }
 - (id)enclosingScrollView { return nil; }
 - (id)nextKeyView { return nil; }
@@ -329,31 +379,198 @@ static void ms_pump(double seconds) {
 - (id)effectiveAppearance { return nil; }
 - (void)setPostsFrameChangedNotifications:(BOOL)posts { (void)posts; }
 - (BOOL)postsFrameChangedNotifications { return NO; }
-@end
+- (void)setPostsBoundsChangedNotifications:(BOOL)posts { (void)posts; }
+- (BOOL)postsBoundsChangedNotifications { return NO; }
+- (void)setAcceptsTouchEvents:(BOOL)accepts { (void)accepts; }
+- (BOOL)acceptsTouchEvents { return YES; }
+- (void)setAutoresizesSubviews:(BOOL)autoresizes { (void)autoresizes; }
+- (BOOL)autoresizesSubviews { return YES; }
 
-@interface NSWindow : MSStubObject {
-    CGRect _msFrame;
-    unsigned long _msStyle;
-    NSString *_msTitle;
-    NSView *_msContentView;
-    id _msDelegate;
-    BOOL _msVisible;
-    BOOL _msKey;
+// AppKit's mouse/keyboard vocabulary. QNSView overrides these, so a touch ends up in Qt.
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (BOOL)becomeFirstResponder { return [super becomeFirstResponder]; }
+- (BOOL)resignFirstResponder { return [super resignFirstResponder]; }
+- (void)mouseDown:(id)event { (void)event; }
+- (void)mouseUp:(id)event { (void)event; }
+- (void)mouseDragged:(id)event { (void)event; }
+- (void)mouseMoved:(id)event { (void)event; }
+- (void)rightMouseDown:(id)event { (void)event; }
+- (void)rightMouseUp:(id)event { (void)event; }
+- (void)rightMouseDragged:(id)event { (void)event; }
+- (void)scrollWheel:(id)event { (void)event; }
+- (void)keyDown:(id)event { (void)event; }
+- (void)keyUp:(id)event { (void)event; }
+- (void)flagsChanged:(id)event { (void)event; }
+- (void)doCommandBySelector:(SEL)selector { (void)selector; }
+- (void)interpretKeyEvents:(id)events { (void)events; }
+
+// Log an unimplemented AppKit selector instead of raising. survivable by design here.
+- (void)doesNotRecognizeSelector:(SEL)selector {
+    studpad_log("[miss] -[%s %s]", class_getName(object_getClass(self)), sel_getName(selector));
+}
+
+// A touch becomes the NSEvent Qt expects. Coordinates are top-left (isFlipped YES), which is what
+// QNSView assumes after convertPoint:fromView:nil.
+- (void)ms_send:(UITouch *)touch type:(long)type {
+    CGPoint point = [touch locationInView:self];
+    NSEvent *event = [NSEvent ms_make:type location:point window:self.window];
+    event->_msButtonNumber = 0;
+    event->_msClickCount = (long)touch.tapCount;
+    event->_msPressure = (float)touch.force;
+    switch (type) {
+        case 1: [self mouseDown:event]; break;
+        case 2: [self mouseUp:event]; break;
+        case 6: [self mouseDragged:event]; break;
+        case 5: [self mouseMoved:event]; break;
+        default: break;
+    }
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    [self becomeFirstResponder];
+    for (UITouch *touch in touches) {
+        // A tap on an empty part of the window is how the input focus moves in a desktop app.
+        [self ms_send:touch type:1];
+    }
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    for (UITouch *touch in touches) [self ms_send:touch type:6];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    for (UITouch *touch in touches) [self ms_send:touch type:2];
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    for (UITouch *touch in touches) [self ms_send:touch type:2];
+}
+
+- (void)ms_panned:(UIPanGestureRecognizer *)pan {
+    CGPoint delta = [pan translationInView:self];
+    [pan setTranslation:CGPointZero inView:self];
+    NSEvent *event = [NSEvent ms_make:22 location:[pan locationInView:self] window:self.window];
+    event->_msScrollingDeltaX = -delta.x;
+    event->_msScrollingDeltaY = -delta.y;
+    event->_msDeltaX = -delta.x;
+    event->_msDeltaY = -delta.y;
+    [self scrollWheel:event];
+}
+
+// Hardware-keyboard input. UIKey gives the HID usage, macOS wants a virtual keycode; the table is
+// US layout, which is the only one the shim claims to support.
+static unsigned short ms_mac_keycode(unsigned short hid) {
+    switch (hid) {
+        case 0x04: return 0;   case 0x05: return 11;  case 0x06: return 8;   case 0x07: return 2;
+        case 0x08: return 14;  case 0x09: return 3;   case 0x0A: return 5;   case 0x0B: return 4;
+        case 0x0C: return 34;  case 0x0D: return 38;  case 0x0E: return 40;  case 0x0F: return 37;
+        case 0x10: return 46;  case 0x11: return 45;  case 0x12: return 31;  case 0x13: return 35;
+        case 0x14: return 12;  case 0x15: return 15;  case 0x16: return 1;   case 0x17: return 17;
+        case 0x18: return 32;  case 0x19: return 9;   case 0x1A: return 13;  case 0x1B: return 7;
+        case 0x1C: return 16;  case 0x1D: return 6;
+        case 0x1E: return 18;  case 0x1F: return 19;  case 0x20: return 20;  case 0x21: return 21;
+        case 0x22: return 23;  case 0x23: return 22;  case 0x24: return 26;  case 0x25: return 28;
+        case 0x26: return 25;  case 0x27: return 29;
+        case 0x28: return 36;  case 0x29: return 53;  case 0x2A: return 51;  case 0x2B: return 48;
+        case 0x2C: return 49;  case 0x2D: return 27;  case 0x2E: return 24;  case 0x2F: return 33;
+        case 0x30: return 30;  case 0x31: return 42;  case 0x33: return 41;  case 0x34: return 39;
+        case 0x35: return 50;  case 0x36: return 43;  case 0x37: return 47;  case 0x38: return 44;
+        case 0x3A: return 122; case 0x3B: return 120; case 0x3C: return 99;  case 0x3D: return 118;
+        case 0x3E: return 96;  case 0x3F: return 97;  case 0x40: return 98;  case 0x41: return 100;
+        case 0x42: return 101; case 0x43: return 109; case 0x44: return 103; case 0x45: return 111;
+        case 0x49: return 115; case 0x4A: return 116; case 0x4B: return 119; case 0x4C: return 117;
+        case 0x4D: return 121; case 0x4E: return 92;  case 0x4F: return 124; case 0x50: return 123;
+        case 0x51: return 125; case 0x52: return 126;
+        case 0xE0: return 59;  case 0xE1: return 56;  case 0xE2: return 58;  case 0xE3: return 55;
+        case 0xE4: return 62;  case 0xE5: return 60;  case 0xE6: return 61;  case 0xE7: return 54;
+        default: return 0xFFFF;
+    }
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    (void)event;
+    for (UIPress *press in presses) {
+        UIKey *key = press.key;
+        if (!key) continue;
+        unsigned short code = ms_mac_keycode(key.keyCode);
+        if (code == 0xFFFF) continue;
+        NSEvent *nsEvent = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+        nsEvent->_msKeyCode = code;
+        nsEvent->_msFlags = key.modifierFlags;
+        nsEvent->_msCharacters = [key.characters copy];
+        // QNSView handles the text path from keyDown: itself (it is the NSTextInputClient).
+        if ([key.characters length]) [self keyDown:nsEvent];
+    }
+}
+
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    (void)event;
+    for (UIPress *press in presses) {
+        UIKey *key = press.key;
+        if (!key) continue;
+        unsigned short code = ms_mac_keycode(key.keyCode);
+        if (code == 0xFFFF) continue;
+        NSEvent *nsEvent = [NSEvent ms_make:11 location:self.bounds.origin window:self.window];
+        nsEvent->_msKeyCode = code;
+        nsEvent->_msFlags = key.modifierFlags;
+        nsEvent->_msCharacters = [key.characters copy];
+        [self keyUp:nsEvent];
+    }
+}
+
+- (BOOL)hasText { return YES; }
+- (void)insertText:(NSString *)text {
+    if (![text length]) return;
+    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    event->_msCharacters = [text copy];
+    [self keyDown:event];
+}
+- (void)deleteBackward {
+    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    event->_msKeyCode = 51;
+    event->_msCharacters = @"\u007f";
+    [self keyDown:event];
 }
 @end
+
+// NSWindow is a real UIWindow. That is what makes `[someView window]` correct for both sides:
+// UIKit needs a UIWindow there, and Qt wants to send NSWindow messages to it. A model object would
+// have made one of the two dereference a lie.
+@interface NSWindow : UIWindow {
+    unsigned long _msStyle;
+    NSString *_msTitle;
+    UIView *_msContentView;
+    id _msDelegate;
+    UIViewController *_msController;
+}
+@end
+
+static UIWindowScene *ms_active_scene(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:UIWindowScene.class]) return (UIWindowScene *)scene;
+    }
+    return nil;
+}
 
 @implementation NSWindow
 
 - (id)initWithContentRect:(CGRect)rect styleMask:(unsigned long)mask backing:(unsigned long)backing
                     defer:(BOOL)defer {
     (void)backing; (void)defer;
-    if ((self = [super init])) {
-        _msFrame = rect;
+    if ((self = [super initWithFrame:rect])) {
         _msStyle = mask;
         _msTitle = @"Studio";
+        UIWindowScene *scene = ms_active_scene();
+        if (scene) self.windowScene = scene;
+        self.backgroundColor = UIColor.blackColor;
+        _msController = [UIViewController new];
         _msContentView = [[NSView alloc] initWithFrame:rect];
-        _msContentView->_msWindow = (NSView *)self;
-        studpad_log("[shim] NSWindow %p %.0fx%.0f", self, rect.size.width, rect.size.height);
+        _msController.view = _msContentView;
+        self.rootViewController = _msController;
+        studpad_log("[shim] NSWindow(UIWindow) %p %.0fx%.0f scene=%p", self, rect.size.width,
+                    rect.size.height, scene);
     }
     return self;
 }
@@ -366,34 +583,35 @@ static void ms_pump(double seconds) {
 
 - (void)makeKeyAndOrderFront:(id)sender {
     (void)sender;
-    _msVisible = YES;
-    _msKey = YES;
-    studpad_log("[shim] makeKeyAndOrderFront %p (%.0fx%.0f)", self, _msFrame.size.width,
-                _msFrame.size.height);
-    studpad_present_view((__bridge void *)_msContentView);
+    studpad_log("[shim] makeKeyAndOrderFront %p (%.0fx%.0f)", self, self.bounds.size.width,
+                self.bounds.size.height);
+    if (!self.windowScene) self.windowScene = ms_active_scene();
+    self.hidden = NO;
+    [self makeKeyAndVisible];
 }
-- (void)orderFront:(id)sender { (void)sender; _msVisible = YES; }
-- (void)orderOut:(id)sender { (void)sender; _msVisible = NO; }
-- (void)makeKeyWindow { _msKey = YES; }
-- (void)close { _msVisible = NO; }
-- (void)setTitle:(id)title { _msTitle = [title copy]; }
+- (void)orderFront:(id)sender { (void)sender; self.hidden = NO; }
+- (void)orderOut:(id)sender { (void)sender; self.hidden = YES; }
+- (void)makeKeyWindow { [super makeKeyWindow]; }
+- (void)close { self.hidden = YES; }
+- (void)setTitle:(id)title {
+    _msTitle = [title copy];
+    studpad_log("[shim] window title: %s", [_msTitle UTF8String]);
+}
 - (id)title { return _msTitle; }
 - (id)contentView { return _msContentView; }
 - (void)setContentView:(id)view {
     _msContentView = view;
-    _msContentView->_msWindow = (NSView *)self;
+    _msController.view = view;
 }
-- (CGRect)frame { return _msFrame; }
-- (void)setFrame:(CGRect)frame display:(BOOL)display { (void)display; _msFrame = frame; }
+- (void)setFrame:(CGRect)frame display:(BOOL)display { (void)display; self.frame = frame; }
 - (void)setFrame:(CGRect)frame display:(BOOL)display animate:(BOOL)animate {
     (void)display; (void)animate;
-    _msFrame = frame;
+    self.frame = frame;
 }
-- (void)setContentSize:(CGSize)size { _msFrame.size = size; }
-- (CGSize)contentSize { return _msFrame.size; }
-- (BOOL)isVisible { return _msVisible; }
-- (BOOL)isKeyWindow { return _msKey; }
-- (BOOL)isMainWindow { return _msKey; }
+- (void)setContentSize:(CGSize)size { self.frame = CGRectMake(0, 0, size.width, size.height); }
+- (CGSize)contentSize { return self.bounds.size; }
+- (BOOL)isVisible { return !self.hidden; }
+- (BOOL)isMainWindow { return self.isKeyWindow; }
 - (long)windowNumber { return 1; }
 - (unsigned long)styleMask { return _msStyle; }
 - (void)setStyleMask:(unsigned long)mask { _msStyle = mask; }
@@ -401,12 +619,12 @@ static void ms_pump(double seconds) {
 - (double)backingScaleFactor { return (double)UIScreen.mainScreen.scale; }
 - (void)setDelegate:(id)delegate { _msDelegate = delegate; }
 - (id)delegate { return _msDelegate; }
-- (void)makeFirstResponder:(id)responder { (void)responder; }
+- (void)makeFirstResponder:(id)responder { [responder becomeFirstResponder]; }
 - (id)firstResponder { return nil; }
 - (void)invalidateShadow { }
 - (void)setOpaque:(BOOL)opaque { (void)opaque; }
 - (BOOL)isOpaque { return YES; }
-- (void)setBackgroundColor:(id)color { (void)color; }
+- (void)setBackgroundColor:(UIColor *)color { (void)color; self.backgroundColor = UIColor.blackColor; }
 - (void)setCollectionBehavior:(unsigned long)behavior { (void)behavior; }
 - (unsigned long)collectionBehavior { return 0; }
 - (void)toggleFullScreen:(id)sender { (void)sender; }
@@ -415,14 +633,29 @@ static void ms_pump(double seconds) {
 - (void)setMaxSize:(CGSize)size { (void)size; }
 - (long)level { return 0; }
 - (void)setLevel:(long)level { (void)level; }
-- (void)center { }
 - (void)zoom:(id)sender { (void)sender; }
 - (void)miniaturize:(id)sender { (void)sender; }
 - (void)setIgnoresMouseEvents:(BOOL)ignores { (void)ignores; }
 - (void)addChildWindow:(id)child ordered:(long)order { (void)child; (void)order; }
 - (void)removeChildWindow:(id)child { (void)child; }
-- (CGRect)contentLayoutRect { return _msFrame; }
-- (id)contentViewController { return nil; }
+- (CGRect)contentLayoutRect { return self.bounds; }
+- (id)contentViewController { return _msController; }
+- (void)sendEvent:(id)event {
+    // AppKit routes a mouse event to the view under it, then to the first responder for keys.
+    NSEvent *nsEvent = event;
+    CGPoint point = [nsEvent locationInWindow];
+    UIView *hit = [_msContentView hitTest:point withEvent:nil];
+    UIView *target = hit ? hit : _msContentView;
+    switch ([nsEvent type]) {
+        case 1: [target mouseDown:nsEvent]; break;
+        case 2: [target mouseUp:nsEvent]; break;
+        case 6: [target mouseDragged:nsEvent]; break;
+        case 22: [target scrollWheel:nsEvent]; break;
+        case 10: [target keyDown:nsEvent]; break;
+        case 11: [target keyUp:nsEvent]; break;
+        default: [target mouseDown:nsEvent]; break;
+    }
+}
 @end
 
 @interface NSApplication : MSStubObject {
@@ -498,6 +731,17 @@ static void ms_pump(double seconds) {
 - (void)hide:(id)sender { (void)sender; }
 - (void)unhide:(id)sender { (void)sender; }
 @end
+
+// Studio's main may hand control to AppKit instead of running Qt's own event loop.
+int NSApplicationMain(int argc, const char *argv[]) {
+    (void)argc;
+    (void)argv;
+    studpad_log("[shim] NSApplicationMain");
+    NSApplication *application = [NSApplication sharedApplication];
+    [application finishLaunching];
+    [application run];
+    return 0;
+}
 
 // AppKit constants are pointer variables on macOS (code loads the value), so they are defined as
 // variables here, not as functions. NSDefaultRunLoopMode and NSRunLoopCommonModes are *not* here:
@@ -609,13 +853,16 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
     return [NSGraphicsContext currentContext];
 }
 + (id)graphicsContextWithWindow:(id)window { (void)window; return [NSGraphicsContext currentContext]; }
-+ (void)saveGraphicsState { }
-+ (void)restoreGraphicsState { }
-- (void)saveGraphicsState { }
-- (void)restoreGraphicsState { }
++ (void)saveGraphicsState { CGContextSaveGState(UIGraphicsGetCurrentContext()); }
++ (void)restoreGraphicsState { CGContextRestoreGState(UIGraphicsGetCurrentContext()); }
+- (void)saveGraphicsState { CGContextSaveGState(UIGraphicsGetCurrentContext()); }
+- (void)restoreGraphicsState { CGContextRestoreGState(UIGraphicsGetCurrentContext()); }
 - (void)flushGraphics { }
 - (BOOL)isFlipped { return YES; }
-- (void *)CGContext { return NULL; }
+// Qt's cocoa backing store draws with the context AppKit put on the stack; on iOS that is UIKit's
+// current context during -drawRect:, so hand it over instead of returning NULL.
+- (void *)CGContext { return (void *)UIGraphicsGetCurrentContext(); }
+- (void *)graphicsPort { return (void *)UIGraphicsGetCurrentContext(); }
 - (void)setShouldAntialias:(BOOL)antialias { (void)antialias; }
 - (BOOL)shouldAntialias { return YES; }
 - (long)imageInterpolation { return 1; }
@@ -721,6 +968,48 @@ static const struct mach_header_64 *find_guest(uint32_t first) {
 
 static int gStarted = 0;
 
+// JIT and memory are the two things a sideloaded desktop app is most likely to be stopped by, so
+// they are measured and logged rather than guessed at. Neither changes how Studio loads:
+//
+//   * StikDebug (with get-task-allow) attaches a debugger and makes Win/Exec memory available; this
+//     build asks for get-task-allow in app/entitlements-sideload.plist. Studio's static imports show
+//     no JIT API use, so JIT is only needed if the RWX probe below fails and the app later faults.
+//   * GetMoreRam adds increased-memory-limit to the App ID; os_proc_available_memory() shows whether
+//     the installed profile actually has it.
+static int ms_debugger_attached(void) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc info;
+    size_t size = sizeof info;
+    memset(&info, 0, sizeof info);
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return -1;
+    return (info.kp_proc.p_flag & P_TRACED) ? 1 : 0;
+}
+
+static void ms_log_runtime_environment(void) {
+    int attached = ms_debugger_attached();
+    studpad_log("debugger attached: %s (StikDebug)",
+                attached == 1 ? "yes" : attached == 0 ? "no" : "unknown");
+
+    void *probe = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (probe == MAP_FAILED) {
+        studpad_log("JIT: executable mmap refused (errno %d); Studio does not use a JIT itself",
+                    errno);
+    } else {
+        studpad_log("JIT: executable mmap granted");
+        munmap(probe, 0x4000);
+    }
+
+    unsigned long long available = (unsigned long long)os_proc_available_memory();
+    unsigned long long physical = NSProcessInfo.processInfo.physicalMemory;
+    studpad_log("memory: %.0f MB available to this process, %.0f MB physical",
+                available / 1048576.0, physical / 1048576.0);
+    if (available < 800ull * 1024 * 1024) {
+        studpad_log("memory: below 800 MB; add Increased Memory Limit to com.kuywoh.studpadstudio "
+                    "with GetMoreRam, then reinstall in SideStore");
+    }
+}
+
 void studpad_guest_start(void) {
     if (gStarted++) return;
     NSString *bundle = NSBundle.mainBundle.bundlePath;
@@ -732,6 +1021,7 @@ void studpad_guest_start(void) {
                 UIDevice.currentDevice.systemVersion.UTF8String,
                 UIDevice.currentDevice.model.UTF8String);
     studpad_log("bundle: %s", bundle.UTF8String);
+    ms_log_runtime_environment();
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:guest]) {
         studpad_log("guest missing at %s (this IPA was built without Studio)", guest.UTF8String);
@@ -743,7 +1033,9 @@ void studpad_guest_start(void) {
                          .firstObject;
     NSDictionary *options =
         [NSDictionary dictionaryWithContentsOfFile:[docs stringByAppendingPathComponent:@"studpad.plist"]];
-    NSString *platform = options[@"QtPlatform"] ? options[@"QtPlatform"] : @"offscreen";
+    // cocoa, not offscreen: the shim now has a UIKit-backed NSApplication/NSWindow/NSView, so
+    // Qt's own platform plugin is the only path that can produce a visible Studio window.
+    NSString *platform = options[@"QtPlatform"] ? options[@"QtPlatform"] : @"cocoa";
     NSString *style = options[@"QtStyle"] ? options[@"QtStyle"] : @"fusion";
     studpad_log("Qt platform: %s, style: %s (Documents/studpad.plist)", platform.UTF8String,
                 style.UTF8String);

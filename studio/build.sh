@@ -55,10 +55,28 @@ annotate_failure() {
 trap annotate_failure ERR
 
 # macOS has no coreutils timeout, and a stuck tool must fail the stage instead of the job.
+#
+# The command runs in its own process group and a timeout kills the whole group. Killing only the
+# direct child is not enough: clang leaves a cc1 process behind, that orphan inherits the step's
+# stdout pipe, and `tee` then waits on it until the job's own 60-minute limit (which is exactly how
+# the previous run "hung" after a compile error).
 guard() {
   local secs=$1
   shift
-  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  perl -e '
+    use POSIX ();
+    my $secs = shift @ARGV;
+    POSIX::setpgid(0, 0);
+    my $pid = fork();
+    die "guard: fork failed: $!" unless defined $pid;
+    if ($pid == 0) { exec @ARGV; exit 127; }
+    $SIG{ALRM} = sub { kill "KILL", -getpgrp(0); };
+    alarm $secs;
+    waitpid($pid, 0);
+    my $status = $?;
+    alarm 0;
+    exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+  ' "$secs" "$@"
 }
 
 sdk_version() {

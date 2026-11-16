@@ -46,6 +46,7 @@ LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 LC_LOAD_DYLIB = 0xC
 LC_ID_DYLIB = 0xD
+LC_LOAD_DYLINKER = 0xE
 LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LOAD_UPWARD_DYLIB = 0x80000023
@@ -249,6 +250,7 @@ def make_loadable(data: bytearray) -> list[str]:
     if pagezero is None:
         raise SystemExit("executable has no __PAGEZERO segment")
 
+    id_result = add_dylib_id(data)
     # Keep the segment command: dyld rebase/bind streams and chained fixups refer to segment
     # ordinals. Mapping one page at the top of the original 4 GB zero region also avoids reserving
     # the whole address range.
@@ -260,8 +262,66 @@ def make_loadable(data: bytearray) -> list[str]:
     )
     return [
         "MH_EXECUTE -> MH_DYLIB (__PAGEZERO mapped at 0xffffc000/0x4000, LC_MAIN kept, "
-        "PIE off, no re-exports; segment ordinals preserved)"
+        "PIE off, no re-exports; segment ordinals preserved)",
+        id_result,
     ]
+
+
+def add_dylib_id(data: bytearray) -> str:
+    """Give the converted image the LC_ID_DYLIB required for a loadable MH_DYLIB."""
+    h = header(data)
+    load_commands = commands(data)
+    if any(cmd == LC_ID_DYLIB for _off, cmd, _size in load_commands):
+        return "LC_ID_DYLIB already present"
+
+    text_offset = None
+    dylinker = None
+    for off, cmd, size in load_commands:
+        if cmd == LC_LOAD_DYLINKER:
+            dylinker = (off, size)
+        if cmd != LC_SEGMENT_64 or cstr(data, off + 8, off + 24) != "__TEXT":
+            continue
+        nsects = struct.unpack_from("<I", data, off + 64)[0]
+        if 72 + nsects * 80 > size:
+            raise SystemExit("__TEXT segment has a truncated section table")
+        for i in range(nsects):
+            section = off + 72 + i * 80
+            section_name = cstr(data, section, section + 16)
+            section_offset = struct.unpack_from("<I", data, section + 48)[0]
+            if section_name == "__text" and section_offset:
+                text_offset = section_offset if text_offset is None else min(text_offset, section_offset)
+
+    load_end = 32 + h["szcmds"]
+    name = b"@rpath/StudioKit.dylib\0"
+    cmdsize = 24 + ((len(name) + 7) & ~7)
+    if (
+        text_offset is not None
+        and load_end + cmdsize <= text_offset
+        and load_end + cmdsize <= len(data)
+        and not any(data[load_end : load_end + cmdsize])
+    ):
+        data[load_end : load_end + cmdsize] = _id_dylib_command(cmdsize, name)
+        struct.pack_into("<II", data, 16, h["ncmds"] + 1, h["szcmds"] + cmdsize)
+        return "inserted LC_ID_DYLIB in __TEXT load-command padding"
+
+    if dylinker:
+        off, size = dylinker
+        fallback_name = b"StudPad\0"
+        if size >= 24 + len(fallback_name) and size % 8 == 0:
+            data[off : off + size] = _id_dylib_command(size, fallback_name)
+            return "reused LC_LOAD_DYLINKER slot for LC_ID_DYLIB"
+
+    raise SystemExit("not enough safe load-command space for required LC_ID_DYLIB")
+
+
+def _id_dylib_command(size: int, name: bytes) -> bytes:
+    if size < 24 + len(name):
+        raise SystemExit("LC_ID_DYLIB command is too small for its install name")
+    return (
+        struct.pack("<IIIIII", LC_ID_DYLIB, size, 24, 2, 0x10000, 0x10000)
+        + name
+        + b"\0" * (size - 24 - len(name))
+    )
 
 
 def _uleb(data: bytearray, i: int) -> tuple[int, int]:

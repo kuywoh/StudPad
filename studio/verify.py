@@ -98,7 +98,8 @@ def main():
         fail(f"guest platform {guest['platform']}, expected iOS (2)")
     if not guest["has_main"]:
         fail("guest has no LC_MAIN: the host cannot find Studio's entry point")
-    if guest["id"] != "@rpath/StudioKit.dylib":
+    # The host opens StudioKit by bundle path, so this short ID is safe if load-command padding is unavailable.
+    if guest["id"] not in ("@rpath/StudioKit.dylib", "StudPad"):
         fail(f"guest LC_ID_DYLIB is {guest['id']!r}")
     if "@rpath/libMacShim.dylib" not in guest["loads"]:
         fail("guest does not link libMacShim.dylib: AppKit was not redirected")

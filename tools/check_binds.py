@@ -5,7 +5,7 @@ Retargeting points AppKit/Carbon/... at libMacShim.dylib, so dyld resolves those
 shim (two-level namespace). If the shim does not export one of them, Studio dies at dlopen with
 "Symbol not found" and no useful log. This check runs on the macOS runner, before the IPA is built:
 
-  for every Mach-O in the app:  xcrun dyld_info -bind    ->  (symbol, library) pairs
+  for every Mach-O in the app:  the bind info, read from the image itself
   symbols bound to libMacShim.dylib  must be exported by libMacShim.dylib
   no bind may still name a macOS framework (that would mean retargeting missed a path)
 """
@@ -16,7 +16,6 @@ import argparse
 import os
 import re
 import struct
-import subprocess
 import sys
 
 LC_LOAD_DYLIB = 0xC
@@ -97,18 +96,6 @@ MACOS_FRAMEWORKS = (
 )
 
 
-def run(cmd: list[str]) -> tuple[int, str]:
-    # stdin is explicitly empty and there is a deadline: a tool given no file argument would
-    # otherwise read stdin, and one that gets stuck must fail the stage instead of the job.
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "timeout: " + " ".join(cmd)
-    return proc.returncode, proc.stdout + proc.stderr
-
-
 MH_MAGIC_64 = 0xFEEDFACF
 MH_MAGIC = 0xFEEDFACE
 FAT_MAGIC_BE = 0xCAFEBABE
@@ -116,6 +103,7 @@ LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 LC_DYLD_INFO = 0x22
 LC_DYLD_INFO_ONLY = 0x80000022
+LC_DYLD_EXPORTS_TRIE = 0x80000033
 LC_DYLD_CHAINED_FIXUPS = 0x80000034
 
 
@@ -292,11 +280,99 @@ def binds(path: str) -> list[tuple[str, str]] | None:
     return sorted(pairs)
 
 
+def _symtab_externals(data: bytes) -> set[str]:
+    """External defined symbols, straight from LC_SYMTAB (what `nm -gU` reports)."""
+    out: set[str] = set()
+    if struct.unpack_from("<I", data, 0)[0] != MH_MAGIC_64:
+        return out
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, off)
+        if cmd == LC_SYMTAB:
+            symoff, nsyms, stroff, strsize = struct.unpack_from("<IIII", data, off + 8)
+            strings = data[stroff : stroff + strsize]
+            for i in range(nsyms):
+                entry = symoff + 16 * i
+                ntype = data[entry + 4]
+                # external (N_EXT), not a stab, and defined (N_ABS or N_SECT, not N_UNDF)
+                if ntype & 0x01 and not ntype & 0xE0 and ntype & 0x0E:
+                    strx = struct.unpack_from("<I", data, entry)[0]
+                    nul = strings.find(b"\0", strx)
+                    if nul > strx:
+                        out.add(strings[strx:nul].decode("utf-8", "replace"))
+        off += size
+    return out
+
+
+def _export_trie_names(data: bytes) -> set[str]:
+    """Symbol names from the export trie.
+
+    Strip removes the symtab, not the trie: Studio's third-party dylibs (Qtitan, fbxsdk, mimalloc)
+    carry no symtab at all, yet dyld resolves every bind against them from the trie. A check that
+    reads only the symtab would decide these libraries export nothing and generate ~600 stubs for
+    symbols that are already real.
+
+    The trie lives in LC_DYLD_INFO's export fields, or in its own LC_DYLD_EXPORTS_TRIE command on
+    chained-fixups images; either way the bytes are the same shape.
+    """
+    trie_off = trie_size = 0
+    for off, cmd, _size in _commands(data):
+        if cmd in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
+            fields = struct.unpack_from("<10I", data, off + 8)
+            trie_off, trie_size = fields[8], fields[9]
+            break
+        if cmd == LC_DYLD_EXPORTS_TRIE:
+            trie_off, trie_size = struct.unpack_from("<II", data, off + 8)
+    if not trie_size:
+        return set()
+    end = trie_off + trie_size
+    out: set[str] = set()
+    _trie_walk(data, trie_off, end, trie_off, b"", 0, out)
+    return out
+
+
+def _trie_walk(data: bytes, trie_off: int, end: int, pos: int, name: bytes, depth: int,
+               out: set) -> None:
+    """Depth-first walk of one trie node; child offsets are relative to the trie start.
+
+    A node is a uleb terminal size, the terminal info itself (flags, then an address, or a
+    re-export ordinal plus string), one child-count byte, then that many NUL-terminated edge
+    strings each followed by a uleb child offset.
+    """
+    if depth > 200 or pos >= end:
+        return
+    terminal_size, i = _uleb(data, pos)
+    if terminal_size and i < end:
+        # The name is exported whether the node is a plain definition or a re-export; what the
+        # terminal info points at is not the question here.
+        out.add(name.decode("utf-8", "replace"))
+    i += terminal_size  # the child count lives after the terminal info, not inside it
+    if i >= end:
+        return
+    edges = data[i]  # a plain byte, not a uleb
+    i += 1
+    for _ in range(edges):
+        nul = data.find(b"\0", i, end)
+        if nul < 0:
+            return
+        child = data[i:nul]
+        i = nul + 1
+        offset, i = _uleb(data, i)
+        _trie_walk(data, trie_off, end, trie_off + offset, name + child, depth + 1, out)
+
+
 def exports(path: str) -> set[str]:
-    code, out = run(["xcrun", "nm", "-gU", "-arch", "arm64", path])
-    if code != 0:
-        raise SystemExit(f"nm failed on {path}")
-    return {line.split()[-1] for line in out.splitlines() if line.split()}
+    """Every symbol the image exports, read from the file itself.
+
+    This is the set dyld can resolve against, which is the symtab's external defined symbols plus
+    the export trie: a stripped dylib exports through the trie alone. Pure Python, so the plan and
+    the check run the same way on any machine, and one subprocess fewer per image.
+    """
+    data = _thin(path)
+    if not data:
+        return set()
+    return _symtab_externals(data) | _export_trie_names(data)
 
 
 def load_commands(path: str) -> list[tuple[int, int, int, bytes]]:

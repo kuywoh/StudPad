@@ -325,10 +325,12 @@ def main() -> int:
 
     stubbing = {s for s in (stubs_shim | stubs_device) if not never_stub(s)}
     generated = {m.group(1) for s in stubbing if (m := OBJC_CLASS.match(s))}
+    # A metaclass symbol always ships with its class: either the class is real (do not touch it) or
+    # the generated class defines both, so a metaclass never needs its own entry.
     stubs = sorted(
         s
         for s in stubbing
-        if not ((m := OBJC_META.match(s)) and m.group(1) in generated)
+        if not OBJC_META.match(s)
         if not (m := OBJC_CLASS.match(s)) or m.group(1) not in NEVER_STUB_CLASSES
         if not SKIP_STUBS.match(s)
     )

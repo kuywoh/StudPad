@@ -37,7 +37,11 @@ def _add_tbd_value(section: str, value: str, found: set[str]) -> None:
     if not value or value.startswith("["):
         return
     if section == "objc-classes":
-        found.add(value if value.startswith("_OBJC_CLASS_$_") else "_OBJC_CLASS_$_" + value)
+        # A class export implies its metaclass: the linker emits both symbols from one
+        # `objc-classes:` entry, so a bind to either resolves against the same library.
+        name = value[len("_OBJC_CLASS_$_") :] if value.startswith("_OBJC_CLASS_$_") else value
+        found.add("_OBJC_CLASS_$_" + name)
+        found.add("_OBJC_METACLASS_$_" + name)
     elif section == "objc-ivars":
         found.add(value if value.startswith("_OBJC_IVAR_$_") else "_OBJC_IVAR_$_" + value)
     elif section == "objc-eh-types":

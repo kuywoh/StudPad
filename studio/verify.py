@@ -13,6 +13,9 @@ import subprocess
 import sys
 import zipfile
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tools.disable_macho_interpose import interpose_sections
+
 MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
 MH_DYLIB = 6
@@ -31,6 +34,7 @@ ROOT = "Payload/StudPadStudio.app"
 GUEST = f"{ROOT}/Frameworks/StudioKit"
 HOST = f"{ROOT}/StudPadStudio"
 SHIM = f"{ROOT}/Frameworks/libMacShim.dylib"
+MIMALLOC = f"{ROOT}/Frameworks/libmimalloc.3.dylib"
 QTCORE = f"{ROOT}/Frameworks/libQtCore.dylib"
 QCOCOA = f"{ROOT}/Frameworks/PlugIns/platforms/libqcocoa.dylib"
 MANIFEST = f"{ROOT}/StudioPackage.plist"
@@ -95,7 +99,7 @@ def main():
     z = zipfile.ZipFile(ipa)
     names = set(z.namelist())
 
-    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, QTCORE, QCOCOA, MANIFEST, f"{ROOT}/qt.conf"):
+    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, MIMALLOC, QTCORE, QCOCOA, MANIFEST, f"{ROOT}/qt.conf"):
         if required not in names:
             fail(f"missing {required}")
 
@@ -124,6 +128,10 @@ def main():
         fail(f"QtCore filetype/platform {qt['filetype']}/{qt['platform']}, expected 6/2")
     if qt["id"] != "@rpath/libQtCore.dylib":
         fail(f"QtCore LC_ID_DYLIB is {qt['id']!r}, expected the flat name")
+
+    interposing = [section for section in interpose_sections(z.read(MIMALLOC)) if section[1]]
+    if interposing:
+        fail(f"mimalloc still has active interpose entries: {interposing!r}")
 
     shim = inspect(z.read(SHIM))
     if shim["filetype"] != MH_DYLIB or shim["platform"] != 2:
@@ -172,7 +180,7 @@ def main():
 
     print(
         f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
-        f"QtCore flat dylib; shim {len(shim['loads'])} re-exported frameworks; "
+        f"QtCore flat dylib; mimalloc interposition disabled; shim {len(shim['loads'])} re-exported frameworks; "
         f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
         f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )

@@ -310,11 +310,48 @@ def machos(root: str) -> list[str]:
     return sorted(found)
 
 
+def framework_reexports(app: str, sdk: str | None) -> list[str]:
+    """iOS frameworks the retargeted images link, which the shim should re-export.
+
+    Retargeting rewrites dylib ordinals in place, and several imports can share one ordinal opcode,
+    so a reroute can pull a whole library's binds to the shim. Re-exporting the frameworks the images
+    link is what makes those binds resolve to the real implementation rather than to a stub.
+    """
+    names: set[str] = set()
+    for path in machos(app):
+        try:
+            data = _thin(path)
+        except OSError:
+            continue
+        for library in _dylibs(data):
+            m = re.match(r"^/System/Library/Frameworks/([A-Za-z0-9_]+)\.framework/", library)
+            if not m or m.group(1) in ("AppKit", "Cocoa"):
+                continue
+            if sdk:
+                tbd = os.path.join(
+                    sdk, "System/Library/Frameworks", f"{m.group(1)}.framework", f"{m.group(1)}.tbd"
+                )
+                if not os.path.exists(tbd):
+                    continue
+            names.add(m.group(1))
+    return sorted(names)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("app")
+    ap.add_argument("app", nargs="?")
     ap.add_argument("--sdk", help="iOS SDK path, for the shim's re-exported frameworks")
+    ap.add_argument(
+        "--frameworks",
+        action="store_true",
+        help="print the iOS frameworks APP links, one per line, and exit",
+    )
     args = ap.parse_args()
+    if not args.app:
+        ap.error("need APP")
+    if args.frameworks:
+        print("\n".join(framework_reexports(args.app, args.sdk)))
+        return 0
 
     shim = os.path.join(args.app, "Frameworks", "libMacShim.dylib")
     if not os.path.exists(shim):

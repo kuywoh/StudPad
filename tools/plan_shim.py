@@ -247,6 +247,12 @@ def main() -> int:
     ap.add_argument("--guest", required=True)
     ap.add_argument("--shipped", nargs="*", default=[])
     ap.add_argument("--have-object", nargs="*", default=[])
+    ap.add_argument(
+        "--reexport",
+        nargs="*",
+        default=[],
+        help="iOS frameworks libMacShim re-exports (in addition to REEXPORTS)",
+    )
     ap.add_argument("--stubs", required=True)
     ap.add_argument("--objc", required=True)
     ap.add_argument("--reroute", required=True)
@@ -258,7 +264,8 @@ def main() -> int:
     for path in args.have_object:
         own_exports |= exports(path)
     ios_all = sdk_symbols(args.sdk)
-    ios_reexported = framework_symbols(args.sdk, REEXPORTS)
+    reexports = sorted(set(REEXPORTS) | set(args.reexport))
+    ios_reexported = framework_symbols(args.sdk, reexports)
 
     shim_bound: set[str] = set()
     device_bound: set[str] = set()

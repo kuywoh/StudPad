@@ -193,6 +193,12 @@ retarget1() {
 [Paths]
 Plugins = Frameworks/PlugIns
 CONF
+
+  # The iOS frameworks these images link. The shim re-exports them for two reasons: an AppKit import
+  # that macOS served through a re-export still needs a real implementation, and a reroute moves
+  # every bind that shares an ordinal opcode with a stub, which can include an entire library.
+  python3 "$ROOT/tools/check_binds.py" "$APP" --sdk "$SDK" --frameworks > "$WORK/reexports.txt"
+  echo "re-exporting $(wc -l < "$WORK/reexports.txt" | tr -d ' ') iOS frameworks"
 }
 
 plan() {
@@ -203,15 +209,23 @@ plan() {
 
   step "plan the stubs: what Studio needs that the iOS SDK does not export"
   local shipped=() lib
-  for lib in "$APP/Frameworks/"*.dylib "$APP/Frameworks/StudioKit" "$APP/"*.dylib; do
+  for lib in "$APP/Frameworks/"*.dylib "$APP/Frameworks/StudioKit" "$APP/"*.dylib \
+    "$APP/Frameworks/PlugIns/"*/*.dylib; do
     [ -f "$lib" ] || continue
     [ "$(basename "$lib")" = "libMacShim.dylib" ] && continue
     shipped+=("$lib")
   done
+  local reexports=() framework
+  if [ -f "$WORK/reexports.txt" ]; then
+    while IFS= read -r framework; do
+      [ -n "$framework" ] && reexports+=("$framework")
+    done < "$WORK/reexports.txt"
+  fi
   guard 1800 python3 "$ROOT/tools/plan_shim.py" \
     --sdk "$SDK" \
     --guest "$APP/Frameworks/StudioKit" \
     --shipped "${shipped[@]}" \
+    --reexport ${reexports[@]+"${reexports[@]}"} \
     --have-object "$WORK/MacShim.o" \
     --stubs "$WORK/stubs.c" \
     --objc "$WORK/stubs_objc.m" \
@@ -228,6 +242,11 @@ retarget2() {
     retarget "$binary" "$binary.rerouted" --reroute "$WORK/reroute.txt"
     mv "$binary.rerouted" "$binary"
   done
+
+  # Plan again against the final ordinals. Rerouting rewrites an ordinal opcode in place and several
+  # imports can share one, so a library's binds can move to the shim as a group; those symbols must
+  # be exported by the shim (through a re-export or a stub), and only this second pass can see them.
+  plan
 }
 
 link() {
@@ -246,19 +265,25 @@ link() {
   done
 
   step "link libMacShim.dylib"
+  local frameworks=(Foundation UIKit CoreFoundation CoreGraphics QuartzCore CoreText ImageIO
+    Security Metal GameController UniformTypeIdentifiers AudioToolbox)
+  local framework known linked=()
+  if [ -f "$WORK/reexports.txt" ]; then
+    while IFS= read -r framework; do
+      [ -n "$framework" ] || continue
+      for known in "${frameworks[@]}"; do
+        [ "$known" = "$framework" ] && continue 2
+      done
+      frameworks+=("$framework")
+    done < "$WORK/reexports.txt"
+  fi
+  for framework in "${frameworks[@]}"; do
+    linked+=(-framework "$framework" -Wl,-reexport_framework,"$framework")
+  done
   guard 600 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -dynamiclib \
     -install_name @rpath/libMacShim.dylib \
     -compatibility_version 9999.0.0 -current_version 9999.0.0 \
-    -framework Foundation -framework UIKit -framework CoreGraphics -framework QuartzCore \
-    -framework CoreFoundation -framework Security -framework Metal -framework CoreText \
-    -framework ImageIO -framework GameController -framework UniformTypeIdentifiers \
-    -framework AudioToolbox \
-    -Wl,-reexport_framework,Foundation -Wl,-reexport_framework,UIKit \
-    -Wl,-reexport_framework,CoreFoundation -Wl,-reexport_framework,CoreGraphics \
-    -Wl,-reexport_framework,QuartzCore -Wl,-reexport_framework,CoreText \
-    -Wl,-reexport_framework,ImageIO -Wl,-reexport_framework,Security \
-    -Wl,-reexport_framework,Metal -Wl,-reexport_framework,GameController \
-    -Wl,-reexport_framework,UniformTypeIdentifiers -Wl,-reexport_framework,AudioToolbox \
+    "${linked[@]}" \
     "${objs[@]}" -o "$APP/Frameworks/libMacShim.dylib"
 }
 

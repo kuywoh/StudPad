@@ -45,7 +45,8 @@ Two details from CyPort that are easy to get wrong and are implemented here:
 | | CyPort | StudPad |
 |---|---|---|
 | App | game engine, one big GL/Metal surface | Qt 5.15 Widgets IDE: `libqcocoa.dylib` + 199 AppKit imports |
-| Input | virtual gamepad, touch-as-mouse | full desktop text input, menus, docking, file dialogs |
+| Input | virtual gamepad, touch-as-mouse | touch-to-mouse, two-finger scroll, pointer hover, and HID key translation; desktop text entry is unverified |
+| Rendering | native Metal game surface | UIKit drawing context plus hosted Core Animation layers; desktop OpenGL is still stubbed |
 | Own code execution | engine rewrites its own `__TEXT` → needs a debugger-assisted JIT helper | no `MAP_JIT`, no JSC, Luau is interpreted → **no JIT helper needed** |
 | Memory | 5 GB, pools of 16/64/32 GB | 200 MB executable + Qt, desktop IDE footprint |
 
@@ -55,9 +56,9 @@ event loop, native menus, panels, tracking areas and text input contexts. The al
 Qt's iOS `qios` plugin against Studio's exact Qt 5.15 build — needs Qt sources matching that ABI and
 is its own project.
 
-The build therefore runs Qt's **Cocoa** platform plugin, because that is the only path that can put
-Studio on screen, and the shim is shaped around what that plugin actually needs rather than around a
-model AppKit:
+The build currently runs Qt's **Cocoa** platform plugin because it is the only packaged path. The
+shim supplies a UIKit-backed view and input bridge, but CI cannot establish whether Qt's Cocoa
+renderer produces a usable Studio window on iPad:
 
 - `NSView` *is* a `UIView`, so the `QNSView` Qt instantiates (it subclasses `NSView` by name at load
 time) is a real UIKit view: UIKit calls Qt's `drawRect:`, and `NSGraphicsContext` hands Qt the current
@@ -65,15 +66,19 @@ UIKit `CGContext` instead of NULL.
 - `NSWindow` *is* a `UIWindow` with a window scene and a root view controller, so `[view window]` is
 the right object for both sides.
 - `UITouch` becomes an `NSEvent` and goes straight into `QNSView`'s `mouseDown:`/`mouseDragged:`/
-`mouseUp:`; `UIKey` HID usages map to macOS virtual keycodes for `keyDown:`; a two-finger pan becomes
-`scrollWheel:`. Qt queues these through `QWindowSystemInterface` as usual, and the shim pumps the main
-`NSRunLoop` while Qt waits for events so UIKit keeps delivering input.
+  `mouseUp:`; `UIKey` HID usages map to macOS virtual keycodes; a two-finger pan becomes
+  `scrollWheel:`, pointer hover becomes `mouseMoved:`, and modifiers become `flagsChanged:`. Qt
+  queues these through `QWindowSystemInterface` as usual, and the shim pumps the main `NSRunLoop`
+  while Qt waits for events so UIKit keeps delivering input.
+- An AppKit layer passed to `NSView.setLayer:` is hosted as a child of UIKit's root layer. That can
+  display a supplied Core Animation or Metal layer; it does not replace CGL or desktop OpenGL.
+  `NSOpenGLContext` remains a logged stub.
 - The shim re-exports every iOS framework the retargeted images link. That is not cosmetic: a
   reroute rewrites an ordinal opcode in place, several imports can share one, so a whole library's
   binds can move to the shim and must still resolve to the real implementation.
 
-The **Fusion** style is still forced, so the UI does not depend on Qt's macOS style plugin. The first
-launch answers the questions that decide the next phase:
+The **Fusion** style is still forced, so the UI does not depend on Qt's macOS style plugin. A device
+launch is still needed to answer the questions that decide the next phase:
 
 - Does dyld accept the retargeted Studio and all nine Qt frameworks, with the shim satisfying every
   AppKit/Carbon import? (`check_binds.py` proves the linking on the runner; only the device proves
@@ -89,24 +94,25 @@ launch answers the questions that decide the next phase:
    `studio/`). Download the `StudPadStudio-ipa` artifact from the run.
 2. iPad: install [SideStore](https://docs.sidestore.io/) once (it needs a computer for the initial
    pair, after that it refreshes itself over LocalDevVPN).
-3. **GetMoreRam** (<https://github.com/hugeBlack/GetMoreRam>): sign in with the same Apple ID, find
-   the App ID for `com.kuywoh.studpadstudio`, *Add Increased Memory Limit*. A free Apple ID cannot
-   turn this on any other way, and a desktop IDE will hit the default per-app limit immediately.
-   Extended virtual addressing is paid-account only; nothing in the shim depends on it yet.
+3. If memory pressure stops the app, use **GetMoreRam** (<https://github.com/hugeBlack/GetMoreRam>)
+   with the same Apple ID, choose `com.kuywoh.studpadstudio`, and add Increased Memory Limit.
+   Refresh or reinstall in SideStore so the updated profile is used. The runtime headroom reading
+   cannot report whether the capability reached the installed profile. Extended virtual addressing
+   is paid-account only; nothing in the shim depends on it yet.
 4. SideStore → **My Apps → +** → pick `StudPadStudio.ipa`. First install creates the App ID; the
    IPA's ad-hoc signature lists `increased-memory-limit`, `extended-virtual-addressing` and
    `get-task-allow`, so SideStore signs with whichever of those the App ID now has. If the memory
    limit was added after the first install, **refresh/reinstall once** so the new profile is used.
-5. Optional, only if something needs a debugger: install
+5. Optional, only if a device failure points to executable memory: install
    [StikDebug](https://github.com/StikDebug/StikDebug), pair it, and launch StudPad Studio from
-   StikDebug. It needs `get-task-allow` in the installed signature (this build asks for it). Studio
-   does not appear on StikDebug's iOS 26 supported-app list, so treat JIT as untested and probably
-   unnecessary: nothing in Studio's static imports wants executable memory.
+   StikDebug. The IPA requests `get-task-allow`, but compatibility with Studio on the installed iOS
+   version is unverified. Static imports show no known JIT use.
 
 ## Reading the result
 
-`Documents/studio.log` is the whole point of this build. Files → On My iPad → StudPad Studio →
-`studio.log` (the app also shows it on screen, bottom half).
+`Documents/studio.log` is the persistent runtime record. Files → On My iPad → StudPad Studio →
+`studio.log`. After a Studio view appears, the panel is hidden so the desktop UI has the full screen;
+tap **Logs** to reopen it.
 
 Useful lines:
 
@@ -134,3 +140,5 @@ implementation; the frame above it names the subsystem.
 Slashplayed (<https://github.com/paulstraw/slashplayed>, MIT) is the other reference: its `spguest`
 loader is the manual map/rebase/bind/ObjC-register/call-`LC_MAIN` path, and its notes on why a
 debugger is needed for self-modifying code are what told us Studio probably does not need one.
+
+

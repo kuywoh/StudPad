@@ -8,8 +8,8 @@
        increased-memory-limit          a free Apple ID gets this via GetMoreRam on the App ID
        extended-virtual-addressing     paid Apple Developer accounts only
 
-     Studio is a desktop IDE with a 200 MB executable plus Qt; the iPad Air's default per-app limit is
-     the first thing it will hit. Free Apple ID: run GetMoreRam, pick this App ID
+     Studio is a desktop IDE with a 200 MB executable plus Qt; device testing must establish whether
+     the default per-app limit blocks it. Free Apple ID: run GetMoreRam, pick this App ID
      (com.kuywoh.studpadstudio), "Add Increased Memory Limit", then reinstall/refresh in SideStore.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,3 +23,5 @@
 	<true/>
 </dict>
 </plist>
+
+

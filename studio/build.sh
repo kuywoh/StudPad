@@ -311,6 +311,7 @@ check() {
 sign() {
   step "ad-hoc sign, carrying the entitlements the IPA asks for"
   local entitlements="$ROOT/app/entitlements-sideload.plist" binary
+  python3 "$ROOT/studio/validate_entitlements.py" "$entitlements"
   for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/"*.dylib "$APP/"*.dylib \
     "$APP/Frameworks/PlugIns/"*/*.dylib; do
     [ -f "$binary" ] || continue
@@ -331,11 +332,13 @@ sign() {
     "$WORK/StudPadStudio.sign"
   mv "$WORK/StudPadStudio.sign" "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
-  codesign -d --entitlements - "$APP/StudPadStudio" 2>/dev/null | grep -q get-task-allow || {
-    echo "ERROR: the main executable's signature does not carry get-task-allow" >&2
+  local signed_entitlements="$WORK/signed-entitlements.plist"
+  codesign -d --entitlements - "$APP/StudPadStudio" >"$signed_entitlements" 2>/dev/null || {
+    echo "ERROR: could not read the main executable's signed entitlements" >&2
     return 1
   }
-  echo "  main executable signed with the sideload entitlements"
+  python3 "$ROOT/studio/validate_entitlements.py" "$signed_entitlements"
+  echo "  main executable signature carries all three requested sideload entitlements"
   return 0
 }
 
@@ -368,3 +371,5 @@ case "$STAGE" in
     exit 2
     ;;
 esac
+
+

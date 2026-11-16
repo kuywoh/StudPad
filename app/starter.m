@@ -14,6 +14,7 @@
 #import "MacShim.h"
 
 static UITextView *gLogView;
+static UIButton *gLogButton;
 static NSMutableString *gText;
 static UIView *gStudioHost;
 static UIActivityIndicatorView *gSpinner;
@@ -75,6 +76,7 @@ static void crash_signal(int sig) {
     gSpinner.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds) / 2);
     gSpinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
     [self.view addSubview:gSpinner];
+    [gSpinner startAnimating];
 
     CGFloat height = self.view.bounds.size.height;
     gLogView = [[UITextView alloc] initWithFrame:CGRectMake(0, height * 0.55, self.view.bounds.size.width, height * 0.45)];
@@ -86,8 +88,36 @@ static void crash_signal(int sig) {
     gLogView.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
     gLogView.text = @"starting…";
     [self.view addSubview:gLogView];
+    studpad_set_log_overlay((__bridge void *)gLogView);
+
+    gLogButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    gLogButton.translatesAutoresizingMaskIntoConstraints = NO;
+    gLogButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    gLogButton.layer.cornerRadius = 8;
+    [gLogButton setTitle:@"Logs" forState:UIControlStateNormal];
+    [gLogButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [gLogButton addTarget:self action:@selector(toggleLogPanel:)
+         forControlEvents:UIControlEventTouchUpInside];
+    gLogButton.hidden = YES;
+    [self.view addSubview:gLogButton];
+    studpad_set_log_button((__bridge void *)gLogButton);
+    [NSLayoutConstraint activateConstraints:@[
+        [gLogButton.trailingAnchor
+            constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor
+                           constant:-12],
+        [gLogButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+                                            constant:12],
+        [gLogButton.widthAnchor constraintGreaterThanOrEqualToConstant:54],
+        [gLogButton.heightAnchor constraintEqualToConstant:36],
+    ]];
 
     studpad_set_log_hook(host_log);
+}
+
+- (void)toggleLogPanel:(UIButton *)sender {
+    gLogView.hidden = !gLogView.hidden;
+    [sender setTitle:gLogView.hidden ? @"Logs" : @"Hide log"
+            forState:UIControlStateNormal];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -151,3 +181,5 @@ int main(int argc, char **argv) {
         return UIApplicationMain(argc, argv, nil, @"StudPadAppDelegate");
     }
 }
+
+

@@ -8,7 +8,7 @@
 //   MSStubObject     root class for the generated AppKit/Carbon classes: an unknown selector on any
 //                    of them logs and returns 0 instead of raising
 //   AppKit slice     NSApplication, NSWindow, NSView, NSEvent, NSScreen, NSMenu, NSMenuItem,
-//                    NSGraphicsContext, NSOpenGLContext, NSOpenGLPixelFormat over UIKit
+//                    NSGraphicsContext over UIKit; logged NSOpenGL stubs
 //   re-exports       Foundation, UIKit, CoreFoundation, CoreGraphics, QuartzCore, CoreText,
 //                    Security, Metal, GameController, UniformTypeIdentifiers, AudioToolbox
 //
@@ -16,6 +16,7 @@
 // per symbol the iOS SDK does not export.
 
 #import "MacShim.h"
+#import "InputBridge.h"
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -302,7 +303,10 @@ static void ms_pump(double seconds) {
 // NSView is a real UIView, not a model object. Qt's cocoa platform plugin instantiates its own
 // QNSView, which subclasses NSView by name at load time: that makes every Studio window a UIView,
 // so UIKit delivers drawing and touches to Qt's own code paths instead of to a stub.
-@interface NSView : UIView <UIKeyInput>
+@interface NSView : UIView <UIKeyInput> {
+@private
+    CALayer *_msHostedLayer;
+}
 @end
 
 @implementation NSView
@@ -317,6 +321,9 @@ static void ms_pump(double seconds) {
         pan.minimumNumberOfTouches = 2;
         pan.maximumNumberOfTouches = 2;
         [self addGestureRecognizer:pan];
+        UIHoverGestureRecognizer *hover =
+            [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(ms_hovered:)];
+        [self addGestureRecognizer:hover];
     }
     return self;
 }
@@ -346,7 +353,54 @@ static void ms_pump(double seconds) {
 - (void)displayIfNeeded { }
 - (BOOL)wantsUpdateLayer { return NO; }
 - (void)updateLayer { }
-- (void)setLayer:(id)layer { (void)layer; }
+
+// UIKit owns the UIView's root layer, so an AppKit layer cannot replace it. Keep the layer Qt or
+// Studio supplies as a child instead; this lets a CAMetalLayer reach Core Animation without
+// pretending that the desktop NSOpenGLContext below is implemented.
+- (void)ms_layoutHostedLayer {
+    CALayer *layer = _msHostedLayer;
+    if (!layer) return;
+    CGFloat scale = self.window.screen.scale;
+    if (scale <= 0) scale = UIScreen.mainScreen.scale;
+    layer.frame = self.bounds;
+    layer.contentsScale = scale;
+    if ([layer isKindOfClass:CAMetalLayer.class]) {
+        CAMetalLayer *metal = (CAMetalLayer *)layer;
+        if (CGSizeEqualToSize(metal.drawableSize, CGSizeZero)) {
+            metal.drawableSize = CGSizeMake(self.bounds.size.width * scale,
+                                            self.bounds.size.height * scale);
+        }
+    }
+}
+
+- (void)setLayer:(id)layer {
+    if (layer && ![layer isKindOfClass:CALayer.class]) {
+        studpad_log("[shim] ignored non-CALayer passed to NSView setLayer:");
+        return;
+    }
+    if (layer == self.layer) return;
+
+    void (^install)(void) = ^{
+        CALayer *next = (CALayer *)layer;
+        if (self->_msHostedLayer == next) return;
+        [self->_msHostedLayer removeFromSuperlayer];
+        self->_msHostedLayer = next;
+        if (next) {
+            next.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+            [self.layer addSublayer:next];
+            [self ms_layoutHostedLayer];
+            studpad_log("[shim] hosted AppKit layer %s in UIKit view",
+                        NSStringFromClass(next.class).UTF8String);
+        }
+    };
+    if (NSThread.isMainThread) install();
+    else dispatch_async(dispatch_get_main_queue(), install);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self ms_layoutHostedLayer];
+}
 - (void)setWantsLayer:(BOOL)wants { (void)wants; }
 - (BOOL)wantsLayer { return YES; }
 - (void)setLayerContentsRedrawPolicy:(long)policy { (void)policy; }
@@ -389,6 +443,7 @@ static void ms_pump(double seconds) {
 
 // AppKit's mouse/keyboard vocabulary. QNSView overrides these, so a touch ends up in Qt.
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
 - (BOOL)becomeFirstResponder { return [super becomeFirstResponder]; }
 - (BOOL)resignFirstResponder { return [super resignFirstResponder]; }
@@ -413,17 +468,19 @@ static void ms_pump(double seconds) {
 
 // A touch becomes the NSEvent Qt expects. Coordinates are top-left (isFlipped YES), which is what
 // QNSView assumes after convertPoint:fromView:nil.
-- (void)ms_send:(UITouch *)touch type:(long)type {
+- (void)ms_send:(UITouch *)touch phase:(int)phase {
+    long type = studpad_mouse_event_for_touch_phase(phase);
+    if (type < 0) return;
     CGPoint point = [touch locationInView:self];
     NSEvent *event = [NSEvent ms_make:type location:point window:self.window];
     event->_msButtonNumber = 0;
     event->_msClickCount = (long)touch.tapCount;
     event->_msPressure = (float)touch.force;
     switch (type) {
-        case 1: [self mouseDown:event]; break;
-        case 2: [self mouseUp:event]; break;
-        case 6: [self mouseDragged:event]; break;
-        case 5: [self mouseMoved:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DOWN: [self mouseDown:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_UP: [self mouseUp:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DRAGGED: [self mouseDragged:event]; break;
+        case STUDPAD_EVENT_MOUSE_MOVED: [self mouseMoved:event]; break;
         default: break;
     }
 }
@@ -433,26 +490,37 @@ static void ms_pump(double seconds) {
     [self becomeFirstResponder];
     for (UITouch *touch in touches) {
         // A tap on an empty part of the window is how the input focus moves in a desktop app.
-        [self ms_send:touch type:1];
+        [self ms_send:touch phase:STUDPAD_TOUCH_BEGAN];
     }
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:6];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_MOVED];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:2];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_ENDED];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:2];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_CANCELLED];
+}
+
+- (void)ms_hovered:(UIHoverGestureRecognizer *)hover {
+    if (hover.state != UIGestureRecognizerStateBegan &&
+        hover.state != UIGestureRecognizerStateChanged) return;
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_MOUSE_MOVED
+                             location:[hover locationInView:self]
+                               window:self.window];
+    [self mouseMoved:event];
 }
 
 - (void)ms_panned:(UIPanGestureRecognizer *)pan {
     CGPoint delta = [pan translationInView:self];
     [pan setTranslation:CGPointZero inView:self];
-    NSEvent *event = [NSEvent ms_make:22 location:[pan locationInView:self] window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_SCROLL_WHEEL
+                             location:[pan locationInView:self]
+                               window:self.window];
     event->_msScrollingDeltaX = -delta.x;
     event->_msScrollingDeltaY = -delta.y;
     event->_msDeltaX = -delta.x;
@@ -460,49 +528,21 @@ static void ms_pump(double seconds) {
     [self scrollWheel:event];
 }
 
-// Hardware-keyboard input. UIKey gives the HID usage, macOS wants a virtual keycode; the table is
-// US layout, which is the only one the shim claims to support.
-static unsigned short ms_mac_keycode(unsigned short hid) {
-    switch (hid) {
-        case 0x04: return 0;   case 0x05: return 11;  case 0x06: return 8;   case 0x07: return 2;
-        case 0x08: return 14;  case 0x09: return 3;   case 0x0A: return 5;   case 0x0B: return 4;
-        case 0x0C: return 34;  case 0x0D: return 38;  case 0x0E: return 40;  case 0x0F: return 37;
-        case 0x10: return 46;  case 0x11: return 45;  case 0x12: return 31;  case 0x13: return 35;
-        case 0x14: return 12;  case 0x15: return 15;  case 0x16: return 1;   case 0x17: return 17;
-        case 0x18: return 32;  case 0x19: return 9;   case 0x1A: return 13;  case 0x1B: return 7;
-        case 0x1C: return 16;  case 0x1D: return 6;
-        case 0x1E: return 18;  case 0x1F: return 19;  case 0x20: return 20;  case 0x21: return 21;
-        case 0x22: return 23;  case 0x23: return 22;  case 0x24: return 26;  case 0x25: return 28;
-        case 0x26: return 25;  case 0x27: return 29;
-        case 0x28: return 36;  case 0x29: return 53;  case 0x2A: return 51;  case 0x2B: return 48;
-        case 0x2C: return 49;  case 0x2D: return 27;  case 0x2E: return 24;  case 0x2F: return 33;
-        case 0x30: return 30;  case 0x31: return 42;  case 0x33: return 41;  case 0x34: return 39;
-        case 0x35: return 50;  case 0x36: return 43;  case 0x37: return 47;  case 0x38: return 44;
-        case 0x3A: return 122; case 0x3B: return 120; case 0x3C: return 99;  case 0x3D: return 118;
-        case 0x3E: return 96;  case 0x3F: return 97;  case 0x40: return 98;  case 0x41: return 100;
-        case 0x42: return 101; case 0x43: return 109; case 0x44: return 103; case 0x45: return 111;
-        case 0x49: return 115; case 0x4A: return 116; case 0x4B: return 119; case 0x4C: return 117;
-        case 0x4D: return 121; case 0x4E: return 92;  case 0x4F: return 124; case 0x50: return 123;
-        case 0x51: return 125; case 0x52: return 126;
-        case 0xE0: return 59;  case 0xE1: return 56;  case 0xE2: return 58;  case 0xE3: return 55;
-        case 0xE4: return 62;  case 0xE5: return 60;  case 0xE6: return 61;  case 0xE7: return 54;
-        default: return 0xFFFF;
-    }
-}
-
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
     (void)event;
     for (UIPress *press in presses) {
         UIKey *key = press.key;
         if (!key) continue;
-        unsigned short code = ms_mac_keycode(key.keyCode);
+        unsigned short code = studpad_mac_keycode_for_hid(key.keyCode);
         if (code == 0xFFFF) continue;
-        NSEvent *nsEvent = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+        long type = studpad_key_event_for_hid(key.keyCode, 1);
+        NSEvent *nsEvent = [NSEvent ms_make:type location:self.bounds.origin window:self.window];
         nsEvent->_msKeyCode = code;
         nsEvent->_msFlags = key.modifierFlags;
         nsEvent->_msCharacters = [key.characters copy];
-        // QNSView handles the text path from keyDown: itself (it is the NSTextInputClient).
-        if ([key.characters length]) [self keyDown:nsEvent];
+        // Modifier transitions carry no characters. QNSView uses flagsChanged: to update shortcuts.
+        if (studpad_hid_usage_is_modifier(key.keyCode)) [self flagsChanged:nsEvent];
+        else [self keyDown:nsEvent];
     }
 }
 
@@ -511,25 +551,27 @@ static unsigned short ms_mac_keycode(unsigned short hid) {
     for (UIPress *press in presses) {
         UIKey *key = press.key;
         if (!key) continue;
-        unsigned short code = ms_mac_keycode(key.keyCode);
+        unsigned short code = studpad_mac_keycode_for_hid(key.keyCode);
         if (code == 0xFFFF) continue;
-        NSEvent *nsEvent = [NSEvent ms_make:11 location:self.bounds.origin window:self.window];
+        long type = studpad_key_event_for_hid(key.keyCode, 0);
+        NSEvent *nsEvent = [NSEvent ms_make:type location:self.bounds.origin window:self.window];
         nsEvent->_msKeyCode = code;
         nsEvent->_msFlags = key.modifierFlags;
         nsEvent->_msCharacters = [key.characters copy];
-        [self keyUp:nsEvent];
+        if (studpad_hid_usage_is_modifier(key.keyCode)) [self flagsChanged:nsEvent];
+        else [self keyUp:nsEvent];
     }
 }
 
 - (BOOL)hasText { return YES; }
 - (void)insertText:(NSString *)text {
     if (![text length]) return;
-    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_KEY_DOWN location:self.bounds.origin window:self.window];
     event->_msCharacters = [text copy];
     [self keyDown:event];
 }
 - (void)deleteBackward {
-    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_KEY_DOWN location:self.bounds.origin window:self.window];
     event->_msKeyCode = 51;
     unichar del = 0x7f;
     event->_msCharacters = [NSString stringWithCharacters:&del length:1];
@@ -664,12 +706,14 @@ static UIWindowScene *ms_active_scene(void) {
     // UIView, so go through id.
     id target = (id)(hit ? hit : _msContentView);
     switch ([nsEvent type]) {
-        case 1: [target mouseDown:nsEvent]; break;
-        case 2: [target mouseUp:nsEvent]; break;
-        case 6: [target mouseDragged:nsEvent]; break;
-        case 22: [target scrollWheel:nsEvent]; break;
-        case 10: [target keyDown:nsEvent]; break;
-        case 11: [target keyUp:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DOWN: [target mouseDown:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_UP: [target mouseUp:nsEvent]; break;
+        case STUDPAD_EVENT_MOUSE_MOVED: [target mouseMoved:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DRAGGED: [target mouseDragged:nsEvent]; break;
+        case STUDPAD_EVENT_SCROLL_WHEEL: [target scrollWheel:nsEvent]; break;
+        case STUDPAD_EVENT_KEY_DOWN: [target keyDown:nsEvent]; break;
+        case STUDPAD_EVENT_KEY_UP: [target keyUp:nsEvent]; break;
+        case STUDPAD_EVENT_FLAGS_CHANGED: [target flagsChanged:nsEvent]; break;
         default: [target mouseDown:nsEvent]; break;
     }
 }
@@ -966,10 +1010,20 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
 
 static __weak UIView *gHostView = nil;
 static __weak UIActivityIndicatorView *gSpinner = nil;
+static __weak UIView *gLogOverlay = nil;
+static __weak UIButton *gLogButton = nil;
 
 void studpad_host_ready(void *host_view, void *spinner) {
     gHostView = (__bridge UIView *)host_view;
     gSpinner = (__bridge UIActivityIndicatorView *)spinner;
+}
+
+void studpad_set_log_overlay(void *view) {
+    gLogOverlay = (__bridge UIView *)view;
+}
+
+void studpad_set_log_button(void *view) {
+    gLogButton = (__bridge UIButton *)view;
 }
 
 void studpad_present_view(void *view) {
@@ -986,7 +1040,11 @@ void studpad_present_view(void *view) {
             UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         content.backgroundColor = UIColor.blackColor;
         [host addSubview:content];
-        [gSpinner startAnimating];
+        gLogOverlay.hidden = YES;
+        [gSpinner stopAnimating];
+        gSpinner.hidden = YES;
+        gLogButton.hidden = NO;
+        [gLogButton setTitle:@"Logs" forState:UIControlStateNormal];
         studpad_log("[shim] presented Studio's content view in the host window");
     });
 }
@@ -1021,8 +1079,8 @@ static int gStarted = 0;
 //   * StikDebug (with get-task-allow) attaches a debugger and makes Win/Exec memory available; this
 //     build asks for get-task-allow in app/entitlements-sideload.plist. Studio's static imports show
 //     no JIT API use, so JIT is only needed if the RWX probe below fails and the app later faults.
-//   * GetMoreRam adds increased-memory-limit to the App ID; os_proc_available_memory() shows whether
-//     the installed profile actually has it.
+//   * GetMoreRam can add increased-memory-limit to the App ID. iOS does not expose that installed
+//     per-app limit here, so os_proc_available_memory() is logged only as a current headroom sample.
 static int ms_debugger_attached(void) {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
     struct kinfo_proc info;
@@ -1043,7 +1101,7 @@ static void ms_log_runtime_environment(void) {
         studpad_log("JIT: executable mmap refused (errno %d); Studio does not use a JIT itself",
                     errno);
     } else {
-        studpad_log("JIT: executable mmap granted");
+        studpad_log("JIT: executable mmap granted (probe only; Studio has no known JIT imports)");
         munmap(probe, 0x4000);
     }
 
@@ -1052,8 +1110,9 @@ static void ms_log_runtime_environment(void) {
     studpad_log("memory: %.0f MB available to this process, %.0f MB physical",
                 available / 1048576.0, physical / 1048576.0);
     if (available < 800ull * 1024 * 1024) {
-        studpad_log("memory: below 800 MB; add Increased Memory Limit to com.kuywoh.studpadstudio "
-                    "with GetMoreRam, then reinstall in SideStore");
+        studpad_log("memory: current headroom below 800 MB; this is not the per-app limit. If the "
+                    "app is stopped by memory pressure, verify Increased Memory Limit on "
+                    "com.kuywoh.studpadstudio with GetMoreRam and refresh SideStore");
     }
 }
 
@@ -1126,3 +1185,5 @@ void studpad_guest_start(void) {
     int rc = entry(1, argv, environ, NULL);
     studpad_log("Studio main returned %d (stub calls: %ld)", rc, studpad_stub_count());
 }
+
+

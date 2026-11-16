@@ -41,6 +41,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test input mapping and sideload entitlements
+        run: |
+          set -euo pipefail
+          mkdir -p .work
+          cc -std=c11 -Wall -Wextra -Werror -Ishim tools/test_input_bridge.c -o .work/test_input_bridge
+          .work/test_input_bridge
+          python3 -m unittest tools.test_sideload_entitlements
+          python3 studio/validate_entitlements.py app/entitlements-sideload.plist
+
       - name: Select an iOS 26 SDK Xcode
         run: |
           set -euo pipefail
@@ -107,3 +116,5 @@ jobs:
             .work/studio/StudPadStudio.ipa.sha256
           if-no-files-found: error
           retention-days: 3
+
+

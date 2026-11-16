@@ -30,6 +30,8 @@ void studpad_guest_start(void);
 // Host glue: the UIViewController passes its container and spinner in.
 void studpad_host_ready(void *host_view, void *spinner);
 void studpad_present_view(void *view);
+void studpad_set_log_overlay(void *view);
+void studpad_set_log_button(void *view);
 
 #ifdef __cplusplus
 }
@@ -43,3 +45,4 @@ void studpad_present_view(void *view);
 #endif
 
 #endif
+

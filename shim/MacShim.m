@@ -36,7 +36,10 @@
 #import <stdlib.h>
 #import <string.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import <sys/sysctl.h>
+#import <limits.h>
+#import <stdint.h>
 #import <unistd.h>
 #import <os/proc.h>
 
@@ -110,29 +113,68 @@ void *studpad_stub_asm(void) {
 
 long studpad_stub_count(void) { return gStubTotal; }
 
+/*
+ * Read a file without relying on NSData's legacy file initializer. Returns a retained CFDataRef;
+ * the app host and the NSDictionary/NSData compatibility methods share this path.
+ */
+CFDataRef studpad_copy_file_data(const char *path) {
+    if (!path || !*path) return NULL;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    struct stat info;
+    if (fstat(fd, &info) != 0 || info.st_size < 0 ||
+        (uintmax_t)info.st_size > (uintmax_t)LONG_MAX ||
+        (uintmax_t)info.st_size > (uintmax_t)SIZE_MAX) {
+        close(fd);
+        return NULL;
+    }
+
+    size_t length = (size_t)info.st_size;
+    UInt8 *bytes = malloc(length ? length : 1);
+    if (!bytes) {
+        close(fd);
+        return NULL;
+    }
+
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > 1024u * 1024u) chunk = 1024u * 1024u;
+        ssize_t count = read(fd, bytes + offset, chunk);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            free(bytes);
+            close(fd);
+            return NULL;
+        }
+        offset += (size_t)count;
+    }
+    close(fd);
+
+    CFDataRef data = CFDataCreate(kCFAllocatorDefault, bytes, (CFIndex)length);
+    free(bytes);
+    return data;
+}
+
 // ---------------------------------------------------------------------------------------------
 // MSStubObject
 // ---------------------------------------------------------------------------------------------
 
 static void ms_zero_imp(id self, SEL _cmd) { (void)self; (void)_cmd; }
 
-// Some Studio builds send the legacy NSDictionary file-loading selector, which is absent from
-// the iOS Foundation class available to the retargeted guest. Keep property-list reading functional
-// for both the UIKit host's StudioPackage.plist and Studio's own settings files.
+// Some Studio builds send legacy Foundation file-loading selectors that are not implemented
+// by the iOS Foundation classes. Use the CFData reader above, then parse standard property lists.
 static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *path) {
     (void)receiver;
     (void)command;
     if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
-    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault,
-        (__bridge CFStringRef)path, kCFURLPOSIXPathStyle, false);
-    if (!url) return nil;
-    CFRelease(url);
-    NSData *fileData = [NSData dataWithContentsOfFile:path];
-    if (!fileData) return nil;
-    CFDataRef data = (__bridge CFDataRef)fileData;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    if (!data) return nil;
     CFErrorRef error = NULL;
     CFPropertyListRef value = CFPropertyListCreateWithData(
         kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
     if (error) CFRelease(error);
     if (!value) return nil;
     if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {
@@ -142,20 +184,40 @@ static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *pat
     return CFBridgingRelease(value);
 }
 
-static void ms_install_dictionary_file_reader(void) {
-    Class dictionary = objc_getClass("NSDictionary");
-    SEL selector = sel_registerName("dictionaryWithContentsOfFile:");
-    if (!dictionary || class_getClassMethod(dictionary, selector)) return;
-    BOOL installed = class_addMethod(object_getClass(dictionary), selector,
-        (IMP)ms_dictionary_contents_of_file, "@@:@");
-    studpad_log("[shim] NSDictionary file plist fallback %s",
-                installed ? "installed" : "could not be installed");
+static id ms_data_contents_of_file(id receiver, SEL command, NSString *path) {
+    (void)receiver;
+    (void)command;
+    if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    return data ? CFBridgingRelease(data) : nil;
+}
+
+static BOOL ms_install_file_reader(Class cls, SEL selector, IMP implementation,
+                                   const char *description) {
+    if (!cls) return NO;
+    if (class_getClassMethod(cls, selector)) return YES;
+    if (class_addMethod(object_getClass(cls), selector, implementation, "@@:@")) {
+        studpad_log("[shim] installed %s compatibility reader", description);
+        return YES;
+    }
+    if (class_getClassMethod(cls, selector)) return YES;
+    studpad_log("[shim] failed to install %s compatibility reader", description);
+    return NO;
+}
+
+static void ms_install_foundation_file_readers(void) {
+    ms_install_file_reader(objc_getClass("NSDictionary"),
+        sel_registerName("dictionaryWithContentsOfFile:"),
+        (IMP)ms_dictionary_contents_of_file, "NSDictionary");
+    ms_install_file_reader(objc_getClass("NSData"),
+        sel_registerName("dataWithContentsOfFile:"),
+        (IMP)ms_data_contents_of_file, "NSData");
 }
 
 @implementation MSStubObject
 
 + (void)load {
-    ms_install_dictionary_file_reader();
+    ms_install_foundation_file_readers();
 }
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
@@ -167,19 +229,18 @@ static void ms_install_dictionary_file_reader(void) {
 
 + (BOOL)resolveInstanceMethod:(SEL)sel { return [self ms_claim:sel isClass:NO]; }
 + (BOOL)resolveClassMethod:(SEL)sel {
-    if (strcmp(class_getName(self), "NSDictionary") == 0 &&
+    const char *name = class_getName(self);
+    if (strcmp(name, "NSDictionary") == 0 &&
         sel_isEqual(sel, sel_registerName("dictionaryWithContentsOfFile:"))) {
-        Class metaclass = object_getClass(self);
-        if (class_addMethod(metaclass, sel, (IMP)ms_dictionary_contents_of_file, "@@:@")) {
-            studpad_log("[shim] resolved NSDictionary dictionaryWithContentsOfFile:");
-            return YES;
-        }
-        if (class_getClassMethod(self, sel)) return YES;
-        studpad_log("[shim] could not resolve NSDictionary dictionaryWithContentsOfFile:");
+        return ms_install_file_reader(self, sel, (IMP)ms_dictionary_contents_of_file,
+                                      "NSDictionary");
+    }
+    if (strcmp(name, "NSData") == 0 &&
+        sel_isEqual(sel, sel_registerName("dataWithContentsOfFile:"))) {
+        return ms_install_file_reader(self, sel, (IMP)ms_data_contents_of_file, "NSData");
     }
     return [self ms_claim:sel isClass:YES];
 }
-
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
     (void)sel;
     return [NSMethodSignature signatureWithObjCTypes:"@@:@@@@@@@@"];

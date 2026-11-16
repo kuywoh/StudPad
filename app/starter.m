@@ -34,16 +34,12 @@ static UIButton *gLaunchButton;
 
 static NSDictionary *read_dictionary_plist(NSString *path) {
     if (path.length == 0) return nil;
-    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault,
-        (__bridge CFStringRef)path, kCFURLPOSIXPathStyle, false);
-    if (!url) return nil;
-    CFRelease(url);
-    NSData *fileData = [NSData dataWithContentsOfFile:path];
-    if (!fileData) return nil;
-    CFDataRef data = (__bridge CFDataRef)fileData;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    if (!data) return nil;
     CFErrorRef error = NULL;
     CFPropertyListRef value = CFPropertyListCreateWithData(
         kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
     if (error) CFRelease(error);
     if (!value) return nil;
     if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {

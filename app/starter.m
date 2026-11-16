@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/ucontext.h>
 #include <stdio.h>
 #import "MacShim.h"
 #import "zip_resources.h"
@@ -64,13 +65,36 @@ static void host_log(const char *line) {
     });
 }
 
-static void crash_signal(int sig) {
+static void crash_signal(int sig, siginfo_t *info, void *context) {
     const char *name = strsignal(sig);
-    char head[160];
-    snprintf(head, sizeof head, "\n=== signal %d (%s) ===\n", sig, name ? name : "?");
+    char head[192];
+    snprintf(head, sizeof head, "\n=== signal %d (%s), address %p ===\n", sig, name ? name : "?",
+             info ? info->si_addr : NULL);
     int fd = open(studpad_log_path_c(), O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
         ssize_t ignored = write(fd, head, strlen(head));
+        // The backtrace only resolves exported symbols, so an abort inside a static helper (Qt's
+        // destructors, libsystem_malloc's error path) shows a bare address. The registers are the
+        // rest of the story: on arm64 x0 is the first argument, so a free() that aborted still says
+        // which pointer it was handed.
+#if defined(__arm64__)
+        if (context) {
+            ucontext_t *uc = (ucontext_t *)context;
+            uint64_t *x = uc->uc_mcontext->__ss.__x;
+            char regs[512];
+            snprintf(regs, sizeof regs,
+                     "registers: x0=%#llx x1=%#llx x2=%#llx x3=%#llx x4=%#llx x5=%#llx x6=%#llx "
+                     "x7=%#llx pc=%#llx lr=%#llx sp=%#llx\n",
+                     (unsigned long long)x[0], (unsigned long long)x[1],
+                     (unsigned long long)x[2], (unsigned long long)x[3],
+                     (unsigned long long)x[4], (unsigned long long)x[5],
+                     (unsigned long long)x[6], (unsigned long long)x[7],
+                     (unsigned long long)uc->uc_mcontext->__ss.__pc,
+                     (unsigned long long)uc->uc_mcontext->__ss.__lr,
+                     (unsigned long long)uc->uc_mcontext->__ss.__sp);
+            ignored = write(fd, regs, strlen(regs));
+        }
+#endif
         void *frames[80];
         int count = backtrace(frames, 80);
         backtrace_symbols_fd(frames, count, fd);
@@ -651,9 +675,14 @@ static void uncaught_exception(NSException *exception) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSSetUncaughtExceptionHandler(uncaught_exception);
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = crash_signal;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
         for (int sig = 1; sig < NSIG; sig++) {
             if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) continue;
-            signal(sig, crash_signal);
+            sigaction(sig, &action, NULL);
         }
         return UIApplicationMain(argc, argv, nil, @"StudPadAppDelegate");
     }

@@ -46,7 +46,6 @@
 extern char **environ;
 
 static int gLogFd = -1;
-static void *gMimallocHandle = NULL;
 static studpad_log_hook gHostLog = NULL;
 static long gStubLines = 0;
 static long gStubTotal = 0;
@@ -1224,6 +1223,56 @@ static int ms_debugger_attached(void) {
     return (info.kp_proc.p_flag & P_TRACED) ? 1 : 0;
 }
 
+// Studio's allocator is part of its ABI, not an optimisation. Its executable links
+// libmimalloc.3.dylib, whose __DATA,__interpose table turns malloc/free into mi_malloc/mi_free, and
+// StudioKit calls mi_* directly as well; on macOS that is one heap. dyld only reads __interpose from
+// images loaded at launch (RuntimeState::buildInterposingTables walks the launch images), so a
+// mimalloc that is dlopen'd here registers nothing: StudioKit then allocates on mimalloc while Qt
+// allocates and frees on libsystem_malloc, and the first free across the two heaps aborts inside
+// libsystem_malloc — during StudioKit's own dyld initialisers, inside QKeySequence's destructor.
+// studio/build.sh therefore links the dylib into the host executable, which makes it a launch image.
+//
+// This probe is the measurement, not a guess: it asks mimalloc whether a plain malloc() block lands
+// in its heap, which is what decides whether the guest's images share one allocator.
+static void ms_log_allocator(void) {
+    void *miMalloc = dlsym(RTLD_DEFAULT, "mi_malloc");
+    void *miFree = dlsym(RTLD_DEFAULT, "mi_free");
+    if (!miMalloc || !miFree) {
+        studpad_log("allocator: mimalloc is not loaded; StudioKit's mi_* imports cannot resolve");
+        return;
+    }
+    Dl_info info;
+    memset(&info, 0, sizeof info);
+    const char *path = (dladdr(miMalloc, &info) && info.dli_fname) ? info.dli_fname : "?";
+    int (*version)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "mi_version");
+    if (version) {
+        int v = version();
+        studpad_log("allocator: mimalloc %d.%d.%d at %s", v / 100, (v / 10) % 10, v % 10, path);
+    } else {
+        studpad_log("allocator: mimalloc at %s", path);
+    }
+
+    int (*owns)(const void *) = (int (*)(const void *))dlsym(RTLD_DEFAULT, "mi_is_in_heap_region");
+    if (!owns) {
+        studpad_log("allocator: mi_is_in_heap_region missing; cannot tell which heap malloc() uses");
+        return;
+    }
+    // An address comparison against mi_malloc can read an unresolved lazy-bind slot, so hand out a
+    // block and let mimalloc say whether it owns it.
+    void *volatile block = malloc(64);
+    int mine = block && owns(block);
+    free((void *)block);
+    studpad_log("allocator: malloc(64) -> %s heap (%p), free -> %s",
+                mine ? "mimalloc" : "libsystem_malloc", block,
+                mine ? "mi_free" : "libsystem free");
+    if (!mine) {
+        studpad_log("allocator: MIXED heaps: StudioKit's mi_* calls and Qt's malloc/free use different "
+                    "allocators, so whichever heap frees the other's pointer aborts");
+        studpad_log("allocator: libmimalloc has to be a load command of the host (studio/build.sh "
+                    "links it) and AMFI has to allow interposing for this sideloaded signature");
+    }
+}
+
 static int ms_jit_enabled(void) {
     typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);
     CSOps csops = (CSOps)dlsym(RTLD_DEFAULT, "csops");
@@ -1263,6 +1312,7 @@ static void ms_log_runtime_environment(void) {
                     "app is stopped by memory pressure, verify Increased Memory Limit on "
                     "com.kuywoh.studpadstudio with GetMoreRam and refresh SideStore");
     }
+    ms_log_allocator();
 }
 
 void studpad_set_studio_launch_path(const char *path) {
@@ -1346,26 +1396,6 @@ void studpad_guest_start(void) {
     setenv("QT_LOGGING_TO_CONSOLE", "1", 1);
     if (chdir(launchDirectory.fileSystemRepresentation) != 0)
         studpad_log("could not set Studio working directory: %s", strerror(errno));
-
-    NSString *mimallocPath = [bundle stringByAppendingPathComponent:@"Frameworks/libmimalloc.3.dylib"];
-    studpad_log("preloading Studio's mimalloc allocator");
-    gMimallocHandle = dlopen(mimallocPath.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
-    if (!gMimallocHandle) {
-        studpad_log("mimalloc preload failed: %s", dlerror() ?: "unknown error");
-    } else {
-        typedef BOOL (*MiIsInHeapRegion)(const void *);
-        typedef void (*MiFree)(void *);
-        MiIsInHeapRegion isInMimalloc = (MiIsInHeapRegion)dlsym(gMimallocHandle, "mi_is_in_heap_region");
-        MiFree mimallocFree = (MiFree)dlsym(gMimallocHandle, "mi_free");
-        void *probe = malloc(64);
-        BOOL redirected = probe && isInMimalloc && mimallocFree && isInMimalloc(probe);
-        studpad_log("mimalloc loaded before Qt/Studio; ordinary malloc interposition: %s",
-                    redirected ? "active" : "not detected");
-        if (probe) {
-            if (redirected) mimallocFree(probe);
-            else free(probe);
-        }
-    }
 
     uint32_t before = _dyld_image_count();
     studpad_log("dlopen(RTLD_NOW|RTLD_GLOBAL)");

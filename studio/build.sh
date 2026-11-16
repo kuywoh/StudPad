@@ -291,11 +291,26 @@ host() {
     -I"$ROOT/app" -c "$ROOT/app/zip_resources.c" -o "$WORK/zip_resources.o"
   guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 \
     -I"$ROOT/app" -c "$ROOT/app/sha256_file.c" -o "$WORK/sha256_file.o"
+  # Studio's allocator is a launch image, not a dlopen. libmimalloc.3.dylib overrides malloc/free
+  # through __DATA,__interpose, and dyld only collects those tuples from images loaded at launch
+  # (dyld's RuntimeState::buildInterposingTables walks the launch images). Link it into the host so
+  # it is one: a dlopen'd copy (the previous build's preload) registers nothing, StudioKit stays on
+  # mimalloc while Qt stays on libsystem_malloc, and the first cross-heap free aborts in
+  # libsystem_malloc during StudioKit's initialisers. StudioKit links the same dylib by @rpath, so
+  # the guest finds the already-loaded copy.
+  local allocator
+  allocator="$(ls "$APP/Frameworks/"libmimalloc*.dylib 2>/dev/null | head -n 1 || true)"
+  [ -n "$allocator" ] || {
+    echo "no staged libmimalloc*.dylib: Studio's allocator is missing from the package" >&2
+    return 1
+  }
+  echo "  launch allocator: $(basename "$allocator")"
   guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 -fobjc-arc \
     -I"$ROOT/shim" -I"$ROOT/app" -framework UIKit -framework Foundation \
     -L"$APP/Frameworks" -lMacShim -Wl,-rpath,@executable_path/Frameworks \
     -Wl,-platform_version,ios,"$IOS_MIN","$SDK_VER" \
-    "$ROOT/app/starter.m" "$WORK/zip_resources.o" "$WORK/sha256_file.o" -lz -o "$APP/StudPadStudio"
+    "$ROOT/app/starter.m" "$WORK/zip_resources.o" "$WORK/sha256_file.o" -lz "$allocator" \
+    -o "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
 
   cp "$ROOT/app/Info.plist" "$APP/Info.plist"

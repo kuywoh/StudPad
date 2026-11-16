@@ -132,6 +132,10 @@ def main():
     interpose_count = active_interpose_tuple_count(z.read(MIMALLOC))
     if not interpose_count:
         fail("mimalloc allocator interposition is missing or disabled")
+    # Active tuples are not enough: dyld only reads them from an image loaded at launch, so the
+    # guest must keep binding mi_* to the dylib and the host must load it (build.sh links it).
+    if not any("libmimalloc" in p for p in guest["loads"]):
+        fail("guest does not link Studio's mimalloc: its mi_* imports would not resolve")
 
     shim = inspect(z.read(SHIM))
     if shim["filetype"] != MH_DYLIB or shim["platform"] != 2:
@@ -145,6 +149,11 @@ def main():
         fail(f"host filetype/platform {host['filetype']}/{host['platform']}, expected 2/2")
     if "@rpath/libMacShim.dylib" not in host["loads"]:
         fail("host does not link the shim, so studpad_guest_start cannot be called")
+    if not any("libmimalloc" in p for p in host["loads"]):
+        fail(
+            "host does not load Studio's mimalloc at launch: dyld only applies its malloc "
+            "interposition to launch images, so Qt and StudioKit would use different heaps"
+        )
     mode = (z.getinfo(HOST).external_attr >> 16) & 0o777
     if not mode & 0o111:
         fail(f"host executable mode is {mode:o}")
@@ -180,8 +189,8 @@ def main():
 
     print(
         f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
-        f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples); "
-        f"shim {len(shim['loads'])} re-exported frameworks; "
+        f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples) and a host "
+        f"launch load command; shim {len(shim['loads'])} re-exported frameworks; "
         f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
         f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )

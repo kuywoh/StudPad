@@ -9,45 +9,41 @@ it. That is the same three-part architecture [CyPort](https://github.com/Thijs20
 run a Mac game on iPhone/iPad, and [Slashplayed](https://github.com/paulstraw/slashplayed) uses for a
 Mac game client. See [docs/cyport.md](docs/cyport.md).
 
-**Status: CI produces a structurally verified IPA; iPad runtime behavior is unverified.** The build
-retargets Studio's images, resolves the imports checked by CI, and packages a UIKit host. The check
-does not prove that Studio starts, that its viewport renders, or that every input path works on an
-iPad. The desktop `NSOpenGLContext` remains a logged stub. Read `Documents/studio.log` after a device
-launch before treating the app as usable.
+**Status: CI builds a smaller installer IPA; iPad runtime behavior is unverified.** The signed IPA
+contains the retargeted Studio engine and Qt runtime. On first launch, StudPad downloads the matching
+official Studio package from Roblox's Mac CDN, verifies its pinned SHA-256, and extracts only the large
+Resources folder into app storage. This reduces the install package; it still downloads the Studio
+content before launch. The desktop `NSOpenGLContext` remains a logged stub, so a working viewport is
+not established.
 [docs/phase0.md](docs/phase0.md) has the static analysis and the feasibility verdict.
 
-JIT and memory are separate from loading. The IPA requests `get-task-allow`,
-`increased-memory-limit`, and `extended-virtual-addressing`; SideStore can keep only capabilities
-allowed by the installed profile. Studio's static imports show no JIT use, so StikDebug is an optional
-diagnostic path. The app logs debugger state, the result of an executable-memory probe, and current
-memory headroom. That headroom is a momentary reading, not the configured per-app limit or proof that
-GetMoreRam was applied.
+The setup screen checks whether the installed profile includes Increased Memory Limit and offers a
+GetMoreRam walkthrough. GetMoreRam updates the Apple ID's app profile; refresh or reinstall StudPad
+after adding the capability. The app also offers a StikDebug handoff using its bundle ID and running
+process ID. Pair StikDebug and assign its current `universal.js` script first. JIT is optional: static
+inspection found no Studio JIT imports, and StikDebug is only a diagnostic/runtime option.
 
 ## Build it
 
 Actions → **studio-build** → *Run workflow* (or push to `shim/`, `app/`, `tools/`, `studio/`).
 
-The job downloads the official arm64 Studio package inside the runner, retargets it, generates the
-shim stubs, links, checks every symbol binding, ad-hoc signs with the sideload entitlements, and
-uploads `StudPadStudio.ipa`. Text reports (`build.log`, `shim-plan.txt`, `retarget.log`) are uploaded
-even when the build fails. Roughly 10–15 minutes on a `macos-15` runner.
+The job downloads the official arm64 Studio package in CI, retargets and signs the engine, and
+places a version-pinned CDN URL, package size and SHA-256 in the IPA. It omits the large Resources
+folder from the installer. The app downloads the matching package and extracts those resources on
+first launch. Text reports are uploaded even when the build fails.
 
 ## Install it (SideStore, free Apple ID)
 
 1. SideStore installed and refreshing (see <https://docs.sidestore.io/>).
-2. If memory pressure stops the app, use [GetMoreRam](https://github.com/hugeBlack/GetMoreRam) with
-   the same Apple ID, choose `com.kuywoh.studpadstudio`, and select **Add Increased Memory Limit**.
-   Refresh or reinstall in SideStore so it uses the updated profile.
-3. SideStore → My Apps → **+** → `StudPadStudio.ipa`. The `StudPadStudio-ipa` Actions artifact is a
-   zip that wraps the IPA — unzip it first. Installing the artifact zip itself fails with
-   "Failed to get bundle ID": the installer finds no `Payload/*.app` inside it.
-4. Optional, and only if a real runtime failure points to executable memory: install
-   [StikDebug](https://github.com/StikDebug/StikDebug), pair it, and assign
-   `com.kuywoh.studpadstudio` the `universal.js` script once. On iOS 26 only a debugger that an app's
-   script cooperates with can grant executable memory, so launch StudPad Studio *from StikDebug* after
-   that. The build checks that the IPA requests `get-task-allow`; this does not prove StikDebug works
-   with Studio on the installed iOS version. Studio has no known JIT imports, so treat this as
-   unverified unless a device failure demonstrates it is needed.
+2. Install the IPA from the workflow artifact (extract the ZIP wrapper first).
+3. On first launch, tap **Download Studio from Roblox** and keep StudPad open until setup finishes.
+   The download uses the official version-pinned Roblox CDN package and stores only Studio Resources
+   in app support; allow free space for the package download and extracted files.
+4. Use the in-app **Set up GetMoreRam** walkthrough if memory is constrained. After adding Increased
+   Memory Limit for `com.kuywoh.studpadstudio`, refresh or reinstall StudPad in SideStore.
+5. JIT is optional. If runtime logs show an executable-memory issue, use **Enable JIT with StikDebug**.
+   Pair StikDebug first and assign its current `universal.js` script to StudPad; the handoff opens
+   StikDebug for the running StudPad process.
 
 Open **StudPad Studio** and read the log in Files → On My iPad → StudPad Studio → `studio.log`.
 After a Studio view appears, the log panel is hidden so it does not cover the app; tap **Logs** to
@@ -63,10 +59,9 @@ calling Studio main
 [stub] … / [miss] -[NSView …]                 # the next API to implement
 ```
 
-The shim maps taps and drags to mouse events, two-finger pans to scrolling, and iPad pointer hover to
-mouse movement. Hardware key usages, including modifier transitions, are translated to macOS key
-events. The on-screen keyboard and the full Qt editing workflow still need device verification.
-The shim can host a layer supplied by Qt or Studio, but that does not implement desktop OpenGL.
+The setup screen reports memory entitlement and debugger state. Touch, keyboard and rendering still
+need device verification. The shim can host a layer supplied by Qt or Studio, but that does not
+implement desktop OpenGL.
 To fall back to Qt's offscreen platform (no window, log only), write
 `Documents/studpad.plist` with `QtPlatform = offscreen`.
 
@@ -74,7 +69,7 @@ To fall back to Qt's offscreen platform (no window, log only), write
 
 | Path | What it does |
 |---|---|
-| `recon/fetch_studio.sh` | Resolves the live Mac Studio build and downloads `mac/arm64/...RobloxStudioApp.zip` (runner only) |
+| `recon/fetch_studio.sh` | Resolves the Mac Studio build and downloads its official package in CI; the iPad fetches the pinned package's Resources on first run |
 | `recon/studio_recon.py` | Mach-O inventory, imports, iOS SDK gap ranking → the Phase 0 report |
 | `tools/ios_retarget.py` | Platform/path/shim rewrite, `MH_EXECUTE`→`MH_DYLIB`, duplicate and ordinal handling |
 | `tools/plan_shim.py` | Works out which symbols iOS lacks and generates logging stubs + the reroute list |
@@ -89,7 +84,8 @@ To fall back to Qt's offscreen platform (no window, log only), write
 ## Hard rules
 
 - **No Roblox binaries in git, releases or shared artifacts.** CI downloads Studio from Roblox's
-  official CDN and uploads an IPA only as a private, short-retention artifact of the user's own run.
+  official CDN, and the app downloads the matching package on the device. CI uploads only a private,
+  short-retention installer artifact for the user's own run.
 - **Interoperability only.** Imports are inspected to learn which APIs a shim must supply. Nothing
   bypasses, patches out or defeats an integrity check or licence protection.
 - **Do not guess.** Anything not measured on a runner or a device is marked unverified.

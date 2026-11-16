@@ -7,6 +7,7 @@ runs. What Studio does is in Documents/studio.log on the iPad.
 
 import os
 import plistlib
+import re
 import struct
 import subprocess
 import sys
@@ -32,6 +33,7 @@ HOST = f"{ROOT}/StudPadStudio"
 SHIM = f"{ROOT}/Frameworks/libMacShim.dylib"
 QTCORE = f"{ROOT}/Frameworks/libQtCore.dylib"
 QCOCOA = f"{ROOT}/Frameworks/PlugIns/platforms/libqcocoa.dylib"
+MANIFEST = f"{ROOT}/StudioPackage.plist"
 
 
 def fail(msg):
@@ -85,7 +87,7 @@ def main():
     z = zipfile.ZipFile(ipa)
     names = set(z.namelist())
 
-    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, QTCORE, QCOCOA, f"{ROOT}/qt.conf"):
+    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, QTCORE, QCOCOA, MANIFEST, f"{ROOT}/qt.conf"):
         if required not in names:
             fail(f"missing {required}")
 
@@ -133,20 +135,36 @@ def main():
     plist = plistlib.loads(z.read(f"{ROOT}/Info.plist"))
     if plist.get("CFBundleExecutable") != "StudPadStudio":
         fail(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}")
-    if not plist.get("CFBundleIdentifier"):
-        fail("no CFBundleIdentifier: the iOS installer refuses the bundle with 'Missing bundle ID'")
+    if plist.get("CFBundleIdentifier") != "com.kuywoh.studpadstudio":
+        fail(f"unexpected CFBundleIdentifier: {plist.get('CFBundleIdentifier')!r}")
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off: the log would not be readable")
     if "UIApplicationSceneManifest" not in plist:
         fail("no scene manifest: iPadOS 26 leaves the app on a black screen")
 
-    if not any(name.startswith(f"{ROOT}/Resources/") for name in names):
-        print("warning: no Resources/ in the IPA; Studio's assets may be missing")
+    manifest = plistlib.loads(z.read(MANIFEST))
+    required_manifest_keys = {
+        "studio_version", "package_url", "package_bytes", "package_sha256",
+        "app_bundle_name", "resource_files", "resource_bytes",
+    }
+    if not required_manifest_keys.issubset(manifest):
+        fail("StudioPackage.plist is missing download metadata")
+    if not manifest["package_url"].startswith("https://setup.rbxcdn.com/mac/arm64/version-") or not manifest["package_url"].endswith("-RobloxStudioApp.zip"):
+        fail("StudioPackage.plist is not pinned to the Roblox Mac Studio CDN")
+    if not isinstance(manifest["package_bytes"], int) or manifest["package_bytes"] <= 100 * 1024 * 1024:
+        fail("StudioPackage.plist has an invalid package size")
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest["package_sha256"]):
+        fail("StudioPackage.plist has an invalid SHA-256")
+    if not manifest["app_bundle_name"].endswith(".app") or manifest["resource_files"] <= 0:
+        fail("StudioPackage.plist has invalid app or resource metadata")
+    if any(name.startswith(f"{ROOT}/Resources/") for name in names):
+        fail("large Studio Resources are still embedded in the installer IPA")
 
     print(
-        f"verify: guest MH_DYLIB iOS + LC_MAIN + shim link; QtCore flat dylib; "
-        f"shim {len(shim['loads'])} re-exported frameworks; host MH_EXECUTE iOS mode={mode:o}; "
-        f"IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
+        f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
+        f"QtCore flat dylib; shim {len(shim['loads'])} re-exported frameworks; "
+        f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
+        f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )
 
 

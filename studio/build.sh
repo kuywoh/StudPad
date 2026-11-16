@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build the StudPad Studio IPA: the official arm64 macOS Studio, retargeted for iOS dyld, loaded by
-# a UIKit host through libMacShim.dylib.
+# Build a small StudPad installer IPA: a retargeted arm64 Studio engine and Qt runtime, with
+# large matching Studio Resources downloaded by the iPad app from Roblox's CDN.
 #
 # Runs on a macOS runner (GitHub Actions) or any Mac with Xcode command line tools. No Apple
 # developer account is needed: the IPA is ad-hoc signed with app/entitlements-sideload.plist and
@@ -186,9 +186,9 @@ retarget1() {
   done
 
   local src; src="$(package_app)"
-  if [ -d "$src/Contents/Resources" ]; then
-    ditto "$src/Contents/Resources" "$APP/Resources"
-  fi
+  python3 "$ROOT/studio/write_studio_manifest.py" \
+    "$WORK/fetch/fetch.txt" "$WORK/fetch/studio.zip" "$APP/StudioPackage.plist"
+  echo "Studio Resources will be downloaded on the iPad at first launch."
   cat >"$APP/qt.conf" <<'CONF'
 [Paths]
 Plugins = Frameworks/PlugIns
@@ -285,11 +285,13 @@ link() {
 
 host() {
   step "build the host app"
+  guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 \
+    -I"$ROOT/app" -c "$ROOT/app/zip_resources.c" -o "$WORK/zip_resources.o"
   guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 -fobjc-arc \
-    -I"$ROOT/shim" -framework UIKit -framework Foundation \
+    -I"$ROOT/shim" -I"$ROOT/app" -framework UIKit -framework Foundation \
     -L"$APP/Frameworks" -lMacShim -Wl,-rpath,@executable_path/Frameworks \
     -Wl,-platform_version,ios,"$IOS_MIN","$SDK_VER" \
-    "$ROOT/app/starter.m" -o "$APP/StudPadStudio"
+    "$ROOT/app/starter.m" "$WORK/zip_resources.o" -lz -o "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
 
   cp "$ROOT/app/Info.plist" "$APP/Info.plist"

@@ -1076,6 +1076,7 @@ static const struct mach_header_64 *find_guest(uint32_t first) {
 }
 
 static int gStarted = 0;
+static char *gStudioLaunchPath = NULL;
 
 // JIT and memory are the two things a sideloaded desktop app is most likely to be stopped by, so
 // they are measured and logged rather than guessed at. Neither changes how Studio loads:
@@ -1096,6 +1097,8 @@ static int ms_debugger_attached(void) {
 
 static void ms_log_runtime_environment(void) {
     int attached = ms_debugger_attached();
+    studpad_log("GetMoreRam increased-memory-limit entitlement: %s",
+                studpad_increased_memory_enabled() ? "active" : "not present");
     studpad_log("debugger attached: %s (StikDebug)",
                 attached == 1 ? "yes" : attached == 0 ? "no" : "unknown");
 
@@ -1120,11 +1123,42 @@ static void ms_log_runtime_environment(void) {
     }
 }
 
+void studpad_set_studio_launch_path(const char *path) {
+    free(gStudioLaunchPath);
+    gStudioLaunchPath = path ? strdup(path) : NULL;
+}
+
+int studpad_debugger_attached(void) {
+    return ms_debugger_attached();
+}
+
+int studpad_increased_memory_enabled(void) {
+    typedef CFTypeRef (*CreateTask)(CFAllocatorRef);
+    typedef CFTypeRef (*CopyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *);
+    CreateTask create = (CreateTask)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+    CopyEntitlement copy = (CopyEntitlement)dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+    if (!create || !copy) return 0;
+    CFTypeRef task = create(kCFAllocatorDefault);
+    if (!task) return 0;
+    CFTypeRef value = copy(task, CFSTR("com.apple.developer.kernel.increased-memory-limit"), NULL);
+    int enabled = value && CFGetTypeID(value) == CFBooleanGetTypeID() &&
+                  CFBooleanGetValue((CFBooleanRef)value);
+    if (value) CFRelease(value);
+    CFRelease(task);
+    return enabled;
+}
+
 void studpad_guest_start(void) {
     if (gStarted++) return;
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *guest = [bundle stringByAppendingPathComponent:@"Frameworks/StudioKit"];
     NSString *plugins = [bundle stringByAppendingPathComponent:@"Frameworks/PlugIns"];
+    NSString *launchArgument = gStudioLaunchPath
+        ? [NSString stringWithUTF8String:gStudioLaunchPath] : guest;
+    NSString *launchDirectory = launchArgument.stringByDeletingLastPathComponent;
+    NSString *resourceDirectory = [[launchDirectory stringByAppendingPathComponent:@"../Resources"]
+        stringByStandardizingPath];
+    NSString *settingsPath = [resourceDirectory stringByAppendingPathComponent:@"AppSettings.xml"];
 
     studpad_log("=== StudPad Studio shim ===");
     studpad_log("device: %s %s (%s)", UIDevice.currentDevice.systemName.UTF8String,
@@ -1137,7 +1171,14 @@ void studpad_guest_start(void) {
         studpad_log("guest missing at %s (this IPA was built without Studio)", guest.UTF8String);
         return;
     }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:settingsPath]) {
+        studpad_log("Studio Resources are missing at %s; download the matching Studio package first",
+                    resourceDirectory.UTF8String);
+        return;
+    }
     studpad_log("guest: %s", guest.UTF8String);
+    studpad_log("Studio argv[0]: %s", launchArgument.UTF8String);
+    studpad_log("Studio Resources: %s", resourceDirectory.UTF8String);
 
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)
                          .firstObject;
@@ -1157,7 +1198,8 @@ void studpad_guest_start(void) {
     setenv("QT_STYLE_OVERRIDE", style.UTF8String, 1);
     setenv("QT_LOGGING_RULES", "qt.qpa.*=true", 1);
     setenv("QT_LOGGING_TO_CONSOLE", "1", 1);
-    chdir(bundle.fileSystemRepresentation);
+    if (chdir(launchDirectory.fileSystemRepresentation) != 0)
+        studpad_log("could not set Studio working directory: %s", strerror(errno));
 
     uint32_t before = _dyld_image_count();
     studpad_log("dlopen(RTLD_NOW|RTLD_GLOBAL)");
@@ -1184,7 +1226,7 @@ void studpad_guest_start(void) {
     studpad_log("guest header %p, entry 0x%llx", header, (unsigned long long)entryoff);
 
     int (*entry)(int, char **, char **, char **) = (void *)((uintptr_t)header + entryoff);
-    char *argv[] = {(char *)guest.fileSystemRepresentation, NULL};
+    char *argv[] = {(char *)launchArgument.fileSystemRepresentation, NULL};
     studpad_log("calling Studio main");
     int rc = entry(1, argv, environ, NULL);
     studpad_log("Studio main returned %d (stub calls: %ld)", rc, studpad_stub_count());

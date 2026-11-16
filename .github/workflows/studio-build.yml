@@ -1,6 +1,6 @@
 name: studio-build
 
-# Builds StudPad Studio: the official arm64 macOS Studio, retargeted for iOS, loaded through
+# Builds StudPad: the iOS-retargeted Studio engine with matching large Studio resources downloaded on first run, loaded through
 # libMacShim.dylib. The IPA contains Studio and is therefore only ever a private artifact of this
 # job; nothing binary is committed. Text reports are uploaded even when the build fails.
 #
@@ -47,7 +47,7 @@ jobs:
           mkdir -p .work
           cc -std=c11 -Wall -Wextra -Werror -Ishim tools/test_input_bridge.c -o .work/test_input_bridge
           .work/test_input_bridge
-          python3 -m unittest tools.test_sideload_entitlements
+          python3 -m unittest tools.test_sideload_entitlements tools.test_studio_manifest tools.test_zip_resources
           python3 studio/validate_entitlements.py app/entitlements-sideload.plist
 
       - name: Select an iOS 26 SDK Xcode

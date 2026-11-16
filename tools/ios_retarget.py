@@ -240,10 +240,13 @@ def make_loadable(data: bytearray) -> list[str]:
     if h["ftype"] != MH_EXECUTE:
         return ["already a dylib/bundle; filetype kept"]
 
-    pagezero = pagezero_size = None
+    pagezero = pagezero_size = pagezero_index = None
+    segment_index = 0
     for off, cmd, size in commands(data):
-        if cmd == LC_SEGMENT_64 and cstr(data, off + 8, off + 24) == "__PAGEZERO":
-            pagezero, pagezero_size = off, size
+        if cmd == LC_SEGMENT_64:
+            if cstr(data, off + 8, off + 24) == "__PAGEZERO":
+                pagezero, pagezero_size, pagezero_index = off, size, segment_index
+            segment_index += 1
     if pagezero is None:
         raise SystemExit("executable has no __PAGEZERO segment")
 
@@ -251,14 +254,18 @@ def make_loadable(data: bytearray) -> list[str]:
     if vmsize:
         struct.pack_into("<QQ", data, pagezero + 24, vmaddr, 0x4000)
 
-    # The segment's load command becomes LC_ID_DYLIB in place: no room is needed after the load
-    # commands, and a segment index is only load-bearing for chained fixups, which Studio's main
-    # executable does not use.
+    # Classic dyld rebase/bind opcodes and chained fixups both index the segment commands. Chained
+    # fixups need a larger starts table rewrite, which this tool deliberately refuses; classic
+    # opcode indices can be safely decremented when __PAGEZERO is removed.
     for off, cmd, size in commands(data):
         if cmd == LC_DYLD_CHAINED_FIXUPS:
             raise SystemExit(
                 "executable uses chained fixups: converting __PAGEZERO would renumber its segments"
             )
+
+    if pagezero_index is None:
+        raise SystemExit("could not determine __PAGEZERO segment index")
+    rebases, binds = remap_segment_indices(data, pagezero_index)
 
     name = b"@rpath/StudioKit.dylib\0"
     needed = 24 + len(name)
@@ -274,7 +281,10 @@ def make_loadable(data: bytearray) -> list[str]:
 
     struct.pack_into("<I", data, 12, MH_DYLIB)
     struct.pack_into("<I", data, 24, h["flags"] & ~MH_PIE)
-    return ["MH_EXECUTE -> MH_DYLIB (__PAGEZERO one page, LC_ID_DYLIB, LC_MAIN kept, PIE off)"]
+    return [
+        f"MH_EXECUTE -> MH_DYLIB (__PAGEZERO -> LC_ID_DYLIB, LC_MAIN kept, PIE off; "
+        f"remapped {rebases} rebase and {binds} bind segment index(es))"
+    ]
 
 
 def _uleb(data: bytearray, i: int) -> tuple[int, int]:
@@ -292,6 +302,88 @@ def _skip_uleb(data: bytearray, i: int) -> int:
     while data[i] & 0x80:
         i += 1
     return i + 1
+
+
+def _skip_uleb_checked(data: bytearray, i: int, end: int, which: str) -> int:
+    while i < end:
+        byte = data[i]
+        i += 1
+        if not byte & 0x80:
+            return i
+    raise SystemExit(f"{which}: unterminated ULEB128")
+
+
+def _shift_segment_index(index: int, removed: int, which: str) -> int:
+    if index == removed:
+        raise SystemExit(f"{which}: opcode targets removed __PAGEZERO segment {removed}")
+    return index - 1 if index > removed else index
+
+
+def remap_rebase_segments(data: bytearray, off: int, size: int, removed: int) -> int:
+    """Adjust classic rebase segment ordinals after removing __PAGEZERO."""
+    if not size:
+        return 0
+    i, end, changed = off, off + size, 0
+    if off < 0 or end > len(data):
+        raise SystemExit("rebase stream extends beyond the Mach-O file")
+    while i < end:
+        pos = i
+        raw = data[i]
+        op, imm = raw & 0xF0, raw & 0x0F
+        i += 1
+        if op == 0x00:  # DONE; remaining bytes are linker padding
+            break
+        if op == 0x20:  # SET_SEGMENT_AND_OFFSET_ULEB
+            i = _skip_uleb_checked(data, i, end, "rebase")
+            shifted = _shift_segment_index(imm, removed, "rebase")
+            if shifted != imm:
+                data[pos] = op | shifted
+                changed += 1
+        elif op in (0x10, 0x40, 0x50):  # TYPE_IMM / ADD_ADDR_IMM_SCALED / DO_REBASE_IMM_TIMES
+            continue
+        elif op in (0x30, 0x60, 0x70):  # one ULEB operand
+            i = _skip_uleb_checked(data, i, end, "rebase")
+        elif op == 0x80:  # DO_REBASE_ULEB_TIMES_SKIPPING_ULEB
+            i = _skip_uleb_checked(data, i, end, "rebase")
+            i = _skip_uleb_checked(data, i, end, "rebase")
+        else:
+            _bad_opcode(data, pos, "rebase")
+    return changed
+
+
+def remap_bind_segments(data: bytearray, off: int, size: int, removed: int, which: str) -> int:
+    """Adjust classic bind segment ordinals without changing their dylib ordinals."""
+    if not size:
+        return 0
+    i, end, changed = off, off + size, 0
+    if off < 0 or end > len(data):
+        raise SystemExit(f"{which}: bind stream extends beyond the Mach-O file")
+    while i < end:
+        pos = i
+        i, kind, value = _bind_step(data, i, end, which)
+        if kind == "segment_imm":
+            shifted = _shift_segment_index(value, removed, which)
+            if shifted != value:
+                data[pos] = 0x70 | shifted
+                changed += 1
+    return changed
+
+
+def remap_segment_indices(data: bytearray, removed: int) -> tuple[int, int]:
+    """Remap classic dyld-info segment ordinals before a segment load command is removed."""
+    rebases = binds = 0
+    for off, cmd, _size in commands(data):
+        if cmd not in (LC_DYLD_INFO, LC_DYLD_INFO_ONLY):
+            continue
+        fields = struct.unpack_from("<10I", data, off + 8)
+        rebases += remap_rebase_segments(data, fields[0], fields[1], removed)
+        for start, length, kind in (
+            (fields[2], fields[3], "bind"),
+            (fields[4], fields[5], "weak bind"),
+            (fields[6], fields[7], "lazy bind"),
+        ):
+            binds += remap_bind_segments(data, start, length, removed, kind)
+    return rebases, binds
 
 
 def _bad_opcode(data: bytearray, pos: int, which: str) -> None:
@@ -321,6 +413,8 @@ def _bind_step(data: bytearray, i: int, end: int, which: str) -> tuple[int, str,
         if nul < 0:
             raise SystemExit(f"{which}: unterminated bind symbol at {i}")
         return nul + 1, "symbol", None
+    if op == 0x70:  # SET_SEGMENT_AND_OFFSET_ULEB
+        return _skip_uleb_checked(data, i, end, which), "segment_imm", imm
     if op in (0x00, 0x30, 0x50, 0x90, 0xB0):  # DONE / SPECIAL_IMM / TYPE_IMM / DO_BIND / IMM_SCALED
         return i, "other", None
     if op in (0x60, 0x70, 0x80, 0xA0):  # ADDEND_SLEB / SEGMENT+ULEB / ADD_ADDR / DO_BIND+ULEB

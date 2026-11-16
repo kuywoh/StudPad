@@ -338,9 +338,10 @@ int studpad_extract_resources_zip(const char *zip_path, const char *destination,
         }
         const char *relative = name + prefix_length;
         size_t relative_length = strlen(relative);
-        int is_directory = relative_length && relative[relative_length - 1] == '/';
-        if (is_directory) relative_length--;
-        if (relative_length == 0 && is_directory) {
+        int is_directory = name[name_size - 1] == '/';
+        if (is_directory && relative_length) relative_length--;
+        /* The Resources/ entry itself has no relative suffix, but is a safe directory. */
+        if (relative_length == 0 && is_directory && name_size == prefix_length) {
             free(name);
             continue;
         }

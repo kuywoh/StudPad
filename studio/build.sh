@@ -329,13 +329,21 @@ sign() {
   # GetMoreRam) are read by SideStore from the main executable's signature. Signing the *bundle* here
   # is not needed and it fails while validating Studio's copied resources as nested code, so the
   # executable is what gets the entitlements and the bundle signature is best effort.
-  guard 300 codesign -f -s - --entitlements "$entitlements" "$APP/StudPadStudio"
+  #
+  # codesign seals the enclosing bundle when it signs a code object inside one and then rejects the
+  # bundle's resources as unsigned nested code, so the executable is signed outside the bundle and
+  # moved back. The identifier is given explicitly because it would otherwise come from the
+  # temporary file's name.
+  cp "$APP/StudPadStudio" "$WORK/StudPadStudio.sign"
+  guard 300 codesign -f -s - -i com.kuywoh.studpadstudio --entitlements "$entitlements" \
+    "$WORK/StudPadStudio.sign"
+  mv "$WORK/StudPadStudio.sign" "$APP/StudPadStudio"
+  chmod 755 "$APP/StudPadStudio"
   codesign -d --entitlements - "$APP/StudPadStudio" 2>/dev/null | grep -q get-task-allow || {
     echo "ERROR: the main executable's signature does not carry get-task-allow" >&2
     return 1
   }
-  guard 900 codesign -f -s - --entitlements "$entitlements" "$APP" 2>/dev/null ||
-    echo "  bundle signature skipped (SideStore re-signs the bundle)"
+  echo "  main executable signed with the sideload entitlements"
   return 0
 }
 

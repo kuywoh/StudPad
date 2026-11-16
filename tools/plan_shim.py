@@ -60,11 +60,14 @@ OBJC_EHTYPE = re.compile(r"^_OBJC_EHTYPE_\$_([A-Za-z_][A-Za-z0-9_.]*)$")
 
 SHIM_NAME = "libMacShim.dylib"
 
-# AppKit globals: pointer variables the guest loads rather than functions it calls.
+# AppKit/Carbon globals: pointer variables the guest loads rather than functions it calls.
 GLOBAL_SHAPED = re.compile(
-    r"^_(NS(App|AppKitVersionNumber)|NS[A-Za-z0-9_]*"
-    r"(Notification|PboardType|RunLoopMode|Attribute|Subrole|Role|Action)|kAE[A-Za-z]+|"
-    r"kInternetEventClass)$"
+    r"^_(NS(App|AppKitVersionNumber|AppearanceName[A-Za-z0-9_]*|"
+    r"Device[A-Za-z0-9_]*ColorSpace|NamedColorSpace|PatternColorSpace|"
+    r"Pasteboard(Name|Type)[A-Za-z0-9_]*|FontWeight[A-Za-z0-9_]*|"
+    r"[A-Za-z0-9_]*(Notification|PboardType|PasteboardType|RunLoopMode|"
+    r"Attribute|Subrole|Role|Action))|kAE[A-Za-z]+|kInternetEventClass|"
+    r"kTIS[A-Za-z0-9_]*)$"
 )
 # The only global-shaped names that really are functions.
 GLOBAL_SHAPED_EXCEPTIONS = {"_NSAccessibilityPostNotification", "_NSFileTypeForHFSTypeCode"}

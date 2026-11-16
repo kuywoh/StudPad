@@ -126,13 +126,13 @@ static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *pat
     CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault,
         (__bridge CFStringRef)path, kCFURLPOSIXPathStyle, false);
     if (!url) return nil;
-    CFDataRef data = CFDataCreateWithContentsOfURL(kCFAllocatorDefault, url);
     CFRelease(url);
-    if (!data) return nil;
+    NSData *fileData = [NSData dataWithContentsOfFile:path];
+    if (!fileData) return nil;
+    CFDataRef data = (__bridge CFDataRef)fileData;
     CFErrorRef error = NULL;
     CFPropertyListRef value = CFPropertyListCreateWithData(
         kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
-    CFRelease(data);
     if (error) CFRelease(error);
     if (!value) return nil;
     if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {

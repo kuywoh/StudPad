@@ -14,7 +14,7 @@ import sys
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.disable_macho_interpose import interpose_sections
+from tools.disable_macho_interpose import active_interpose_tuple_count
 
 MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
@@ -129,9 +129,9 @@ def main():
     if qt["id"] != "@rpath/libQtCore.dylib":
         fail(f"QtCore LC_ID_DYLIB is {qt['id']!r}, expected the flat name")
 
-    interposing = [section for section in interpose_sections(z.read(MIMALLOC)) if section[1]]
-    if interposing:
-        fail(f"mimalloc still has active interpose entries: {interposing!r}")
+    interpose_count = active_interpose_tuple_count(z.read(MIMALLOC))
+    if not interpose_count:
+        fail("mimalloc allocator interposition is missing or disabled")
 
     shim = inspect(z.read(SHIM))
     if shim["filetype"] != MH_DYLIB or shim["platform"] != 2:
@@ -180,7 +180,8 @@ def main():
 
     print(
         f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
-        f"QtCore flat dylib; mimalloc interposition disabled; shim {len(shim['loads'])} re-exported frameworks; "
+        f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples); "
+        f"shim {len(shim['loads'])} re-exported frameworks; "
         f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
         f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )

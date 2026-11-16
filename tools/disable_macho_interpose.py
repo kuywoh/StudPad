@@ -54,6 +54,16 @@ def interpose_sections(data: bytes) -> list[tuple[str, int, int]]:
     return sections
 
 
+def active_interpose_tuple_count(data: bytes) -> int:
+    """Return the number of active tuples, rejecting malformed section sizes."""
+    count = 0
+    for _segment, size, _size_offset in interpose_sections(data):
+        if size % INTERPOSE_TUPLE_SIZE:
+            raise ValueError(f"__interpose section size {size} is not tuple aligned")
+        count += size // INTERPOSE_TUPLE_SIZE
+    return count
+
+
 def disable_interposing(data: bytes) -> tuple[bytes, int, int]:
     """Zero the metadata size for every interpose tuple section, preserving other image data."""
     patched = bytearray(data)
@@ -73,11 +83,19 @@ def disable_interposing(data: bytes) -> tuple[bytes, int, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if active interpose tuples remain")
+    parser.add_argument("--check-active", action="store_true", help="fail if no active interpose tuples remain")
     parser.add_argument("binary")
     args = parser.parse_args()
     with open(args.binary, "rb") as source:
         original = source.read()
     sections = interpose_sections(original)
+    if args.check_active:
+        count = active_interpose_tuple_count(original)
+        if not count:
+            print("ERROR: no active __interpose tuples found", file=sys.stderr)
+            return 1
+        print(f"mimalloc interpose check passed ({count} active tuple(s))")
+        return 0
     if args.check:
         active = [(segment, size) for segment, size, _ in sections if size]
         if active:

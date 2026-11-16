@@ -46,6 +46,7 @@
 extern char **environ;
 
 static int gLogFd = -1;
+static void *gMimallocHandle = NULL;
 static studpad_log_hook gHostLog = NULL;
 static long gStubLines = 0;
 static long gStubTotal = 0;
@@ -1345,6 +1346,26 @@ void studpad_guest_start(void) {
     setenv("QT_LOGGING_TO_CONSOLE", "1", 1);
     if (chdir(launchDirectory.fileSystemRepresentation) != 0)
         studpad_log("could not set Studio working directory: %s", strerror(errno));
+
+    NSString *mimallocPath = [bundle stringByAppendingPathComponent:@"Frameworks/libmimalloc.3.dylib"];
+    studpad_log("preloading Studio's mimalloc allocator");
+    gMimallocHandle = dlopen(mimallocPath.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
+    if (!gMimallocHandle) {
+        studpad_log("mimalloc preload failed: %s", dlerror() ?: "unknown error");
+    } else {
+        typedef BOOL (*MiIsInHeapRegion)(const void *);
+        typedef void (*MiFree)(void *);
+        MiIsInHeapRegion isInMimalloc = (MiIsInHeapRegion)dlsym(gMimallocHandle, "mi_is_in_heap_region");
+        MiFree mimallocFree = (MiFree)dlsym(gMimallocHandle, "mi_free");
+        void *probe = malloc(64);
+        BOOL redirected = probe && isInMimalloc && mimallocFree && isInMimalloc(probe);
+        studpad_log("mimalloc loaded before Qt/Studio; ordinary malloc interposition: %s",
+                    redirected ? "active" : "not detected");
+        if (probe) {
+            if (redirected) mimallocFree(probe);
+            else free(probe);
+        }
+    }
 
     uint32_t before = _dyld_image_count();
     studpad_log("dlopen(RTLD_NOW|RTLD_GLOBAL)");

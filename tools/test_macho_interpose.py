@@ -3,7 +3,11 @@
 import struct
 import unittest
 
-from tools.disable_macho_interpose import disable_interposing, interpose_sections
+from tools.disable_macho_interpose import (
+    active_interpose_tuple_count,
+    disable_interposing,
+    interpose_sections,
+)
 
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -25,6 +29,13 @@ def mach_o_with_interpose(size=32):
 
 
 class InterposeSectionTests(unittest.TestCase):
+    def test_counts_active_allocator_interpose_tuples(self):
+        self.assertEqual(active_interpose_tuple_count(mach_o_with_interpose()), 2)
+
+    def test_disabled_interpose_section_has_no_active_tuples(self):
+        patched, _, _ = disable_interposing(mach_o_with_interpose())
+        self.assertEqual(active_interpose_tuple_count(patched), 0)
+
     def test_disables_interpose_tuples_and_preserves_other_bytes(self):
         original = mach_o_with_interpose()
         patched, sections, tuples = disable_interposing(original)

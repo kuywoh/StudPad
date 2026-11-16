@@ -185,8 +185,7 @@ retarget1() {
     retarget "$plugin" "$APP/Frameworks/PlugIns/$(basename "$(dirname "$plugin")")/$(basename "$plugin")"
   done
 
-  # Keep Studio's explicit mi_* APIs, but disable macOS-only process-wide malloc/free interposition.
-  python3 "$ROOT/tools/disable_macho_interpose.py" "$APP/Frameworks/libmimalloc.3.dylib"
+  # Preserve mimalloc's process-wide interposition so Qt and Studio share one allocator heap.
 
   local src; src="$(package_app)"
   python3 "$ROOT/studio/write_studio_manifest.py" \
@@ -314,7 +313,7 @@ host() {
 check() {
   step "check every import the shim has to satisfy"
   guard 1800 python3 "$ROOT/tools/check_binds.py" "$APP" --sdk "$SDK"
-  python3 "$ROOT/tools/disable_macho_interpose.py" --check "$APP/Frameworks/libmimalloc.3.dylib"
+  python3 "$ROOT/tools/disable_macho_interpose.py" --check-active "$APP/Frameworks/libmimalloc.3.dylib"
 }
 
 sign() {

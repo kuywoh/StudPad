@@ -75,8 +75,8 @@ static int safe_relative_path(const char *path, size_t length) {
             size_t part = i - start;
             if (!part || (part == 1 && path[start] == '.') ||
                 (part == 2 && path[start] == '.' && path[start + 1] == '.')) return 0;
-            for (size_t j = start; j < i; j++)
-                if ((unsigned char)path[j] < 0x20 || path[j] == ':') return 0;
+            /* Match studio.write_studio_manifest.safe_resource_path: POSIX permits colons and control bytes
+             * in filenames, while component checks above still reject traversal. */
             start = i + 1;
         }
     }

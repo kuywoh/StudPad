@@ -13,6 +13,8 @@ class StudioManifestTests(unittest.TestCase):
         package = root / "studio.zip"
         with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("RobloxStudio.app/Contents/Resources/AppSettings.xml", b"settings")
+            archive.writestr("RobloxStudio.app/Contents/Resources/Asset:Variant.bin", b"colon")
+            archive.writestr("RobloxStudio.app/Contents/Resources/control\tname.bin", b"control")
             archive.writestr("RobloxStudio.app/Contents/MacOS/RobloxStudio", b"ignored")
         upload = "version-abcdef1234567890"
         fetch = root / "fetch.txt"
@@ -36,8 +38,8 @@ class StudioManifestTests(unittest.TestCase):
             fetch, package = self.make_files(Path(directory))
             result = build_manifest(fetch, package, minimum_package_bytes=0)
             self.assertEqual(result["studio_version"], "0.700.0")
-            self.assertEqual(result["resource_files"], 1)
-            self.assertEqual(result["resource_bytes"], len(b"settings"))
+            self.assertEqual(result["resource_files"], 3)
+            self.assertEqual(result["resource_bytes"], len(b"settings") + len(b"colon") + len(b"control"))
             self.assertEqual(result["app_bundle_name"], "RobloxStudio.app")
 
     def test_rejects_non_roblox_download_url(self):

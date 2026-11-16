@@ -70,6 +70,18 @@ class ZipResourceTests(unittest.TestCase):
         self.assertFalse((destination / "RobloxStudio").exists())
         self.assertFalse((destination.parent / "escape.txt").exists())
 
+    def test_extracts_posix_filename_characters(self):
+        directory, destination, result = self.run_extractor(
+            [
+                ("RobloxStudio.app/Contents/Resources/Assets/variant:dark.dat", b"colon"),
+                ("RobloxStudio.app/Contents/Resources/Assets/control\tname.dat", b"control"),
+            ]
+        )
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((destination / "Assets" / "variant:dark.dat").read_bytes(), b"colon")
+        self.assertEqual((destination / "Assets" / "control\tname.dat").read_bytes(), b"control")
+
     def test_rejects_path_traversal(self):
         directory, _destination, result = self.run_extractor(
             [

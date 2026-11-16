@@ -37,6 +37,12 @@ Studio aborted before its first window. The shim interposes those four calls for
 only and reports the app container instead, and pins `HOME` and `CFFIXED_USER_HOME` to it so
 every home lookup the guest makes agrees.
 
+AppKit's globals have to be real data, not stubs. `NSApp`, the `*Notification` names, the
+`*PboardType` names and `NSAppKitVersionNumber` are variables the guest loads a pointer out of; a
+generated *function* under one of those names hands Studio that function's machine code, which
+shows up as a message to a wild object far from the cause. `shim/MacShim.m` defines each one Studio
+binds, and `tools/plan_shim.py` now lists any global-shaped name it would still stub as a function.
+
 ## Build it
 
 Actions → **studio-build** → *Run workflow* (or push to `shim/`, `app/`, `tools/`, `studio/`).

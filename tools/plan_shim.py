@@ -30,6 +30,11 @@ Known limit: the stub list has no type information, so a stub for a *constant* (
 function, not a valid object, and a stub for a float- or struct-returning function returns 0 in the
 integer register. A crash there is the expected way to find out which symbol needs a real
 implementation; the log names it.
+
+Globals are the worst case of that limit because the failure is silent: the guest loads the
+symbol's address as if it held a pointer, gets the function's machine code, and later sends a
+message to a wild object. shim/MacShim.m defines the ones Studio binds; anything this tool would
+still stub with a global-shaped name is reported so it can be given real data there.
 """
 
 from __future__ import annotations
@@ -54,6 +59,15 @@ OBJC_IVAR = re.compile(r"^_OBJC_IVAR_\$_([A-Za-z_][A-Za-z0-9_.]*)$")
 OBJC_EHTYPE = re.compile(r"^_OBJC_EHTYPE_\$_([A-Za-z_][A-Za-z0-9_.]*)$")
 
 SHIM_NAME = "libMacShim.dylib"
+
+# AppKit globals: pointer variables the guest loads rather than functions it calls.
+GLOBAL_SHAPED = re.compile(
+    r"^_(NS(App|AppKitVersionNumber)|NS[A-Za-z0-9_]*"
+    r"(Notification|PboardType|RunLoopMode|Attribute|Subrole|Role|Action)|kAE[A-Za-z]+|"
+    r"kInternetEventClass)$"
+)
+# The only global-shaped names that really are functions.
+GLOBAL_SHAPED_EXCEPTIONS = {"_NSAccessibilityPostNotification", "_NSFileTypeForHFSTypeCode"}
 
 # Must match the -Wl,-reexport_framework list in studio/build.sh.
 REEXPORTS = [
@@ -351,6 +365,17 @@ def main() -> int:
         raise SystemExit("no missing symbols: has Studio changed shape?")
 
     groups = classify(stubs)
+    suspects = sorted(
+        symbol
+        for group in ("functions", "asm")
+        for symbol in groups[group]
+        if GLOBAL_SHAPED.match(symbol) and symbol not in GLOBAL_SHAPED_EXCEPTIONS
+    )
+    if suspects:
+        print(
+            f"  warning: {len(suspects)} stub(s) look like globals and would be read as pointers: "
+            + ", ".join(suspects)
+        )
     write_c_stubs(groups, args.stubs)
     classes = write_objc_stubs(groups, args.objc)
     with open(args.reroute, "w", encoding="utf-8") as f:

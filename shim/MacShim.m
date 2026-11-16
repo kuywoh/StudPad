@@ -1146,9 +1146,16 @@ static UIWindowScene *ms_active_scene(void) {
 - (id)ms_lastWindow;
 @end
 
-
+// AppKit's NSApp is a variable, not a function: the guest loads the pointer out of it. Anything
+// else here — a stub generated as a function — puts code bytes where Studio reads an object
+// pointer, which is how build 59 ended up sending addObserver: to a tagged pointer string.
+NSApplication *NSApp = nil;
 
 @implementation NSApplication
+
++ (void)load {
+    NSApp = [NSApplication sharedApplication];
+}
 
 - (id)ms_lastWindow {
     @synchronized(gWindows) {
@@ -1258,6 +1265,131 @@ NSString *const NSEventTrackingRunLoopMode = @"NSEventTrackingRunLoopMode";
 NSString *const NSModalPanelRunLoopMode = @"NSModalPanelRunLoopMode";
 NSString *const NSApplicationDidFinishLaunchingNotification =
     @"NSApplicationDidFinishLaunchingNotification";
+
+// The rest of AppKit's globals that Studio and Qt's cocoa plugin bind. Each is a pointer variable
+// the guest loads, so each has to be real data here: plan_shim would otherwise generate a function
+// for the name, and the guest would read that function's machine code as a pointer. They are only
+// ever compared or handed back to AppKit, so their value only has to be unique and non-nil.
+NSString *const NSAccessibilityApplicationRole = @"NSAccessibilityApplicationRole";
+NSString *const NSAccessibilityAttributedStringForRangeParameterizedAttribute =
+    @"NSAccessibilityAttributedStringForRangeParameterizedAttribute";
+NSString *const NSAccessibilityBoundsForRangeParameterizedAttribute =
+    @"NSAccessibilityBoundsForRangeParameterizedAttribute";
+NSString *const NSAccessibilityButtonRole = @"NSAccessibilityButtonRole";
+NSString *const NSAccessibilityCheckBoxRole = @"NSAccessibilityCheckBoxRole";
+NSString *const NSAccessibilityChildrenAttribute = @"NSAccessibilityChildrenAttribute";
+NSString *const NSAccessibilityColorWellRole = @"NSAccessibilityColorWellRole";
+NSString *const NSAccessibilityColumnRole = @"NSAccessibilityColumnRole";
+NSString *const NSAccessibilityComboBoxRole = @"NSAccessibilityComboBoxRole";
+NSString *const NSAccessibilityDecrementAction = @"NSAccessibilityDecrementAction";
+NSString *const NSAccessibilityFocusedAttribute = @"NSAccessibilityFocusedAttribute";
+NSString *const NSAccessibilityFocusedUIElementChangedNotification =
+    @"NSAccessibilityFocusedUIElementChangedNotification";
+NSString *const NSAccessibilityGroupRole = @"NSAccessibilityGroupRole";
+NSString *const NSAccessibilityGrowAreaRole = @"NSAccessibilityGrowAreaRole";
+NSString *const NSAccessibilityImageRole = @"NSAccessibilityImageRole";
+NSString *const NSAccessibilityIncrementAction = @"NSAccessibilityIncrementAction";
+NSString *const NSAccessibilityIncrementorRole = @"NSAccessibilityIncrementorRole";
+NSString *const NSAccessibilityLineForIndexParameterizedAttribute =
+    @"NSAccessibilityLineForIndexParameterizedAttribute";
+NSString *const NSAccessibilityLinkRole = @"NSAccessibilityLinkRole";
+NSString *const NSAccessibilityListRole = @"NSAccessibilityListRole";
+NSString *const NSAccessibilityMenuBarRole = @"NSAccessibilityMenuBarRole";
+NSString *const NSAccessibilityMenuButtonRole = @"NSAccessibilityMenuButtonRole";
+NSString *const NSAccessibilityMenuItemRole = @"NSAccessibilityMenuItemRole";
+NSString *const NSAccessibilityMenuRole = @"NSAccessibilityMenuRole";
+NSString *const NSAccessibilityPopUpButtonRole = @"NSAccessibilityPopUpButtonRole";
+NSString *const NSAccessibilityPressAction = @"NSAccessibilityPressAction";
+NSString *const NSAccessibilityProgressIndicatorRole = @"NSAccessibilityProgressIndicatorRole";
+NSString *const NSAccessibilityRadioButtonRole = @"NSAccessibilityRadioButtonRole";
+NSString *const NSAccessibilityRaiseAction = @"NSAccessibilityRaiseAction";
+NSString *const NSAccessibilityRangeForLineParameterizedAttribute =
+    @"NSAccessibilityRangeForLineParameterizedAttribute";
+NSString *const NSAccessibilityRangeForPositionParameterizedAttribute =
+    @"NSAccessibilityRangeForPositionParameterizedAttribute";
+NSString *const NSAccessibilityRoleDescription = @"NSAccessibilityRoleDescription";
+NSString *const NSAccessibilityRowRole = @"NSAccessibilityRowRole";
+NSString *const NSAccessibilityScrollBarRole = @"NSAccessibilityScrollBarRole";
+NSString *const NSAccessibilitySearchFieldSubrole = @"NSAccessibilitySearchFieldSubrole";
+NSString *const NSAccessibilitySecureTextFieldSubrole = @"NSAccessibilitySecureTextFieldSubrole";
+NSString *const NSAccessibilitySelectedTextChangedNotification =
+    @"NSAccessibilitySelectedTextChangedNotification";
+NSString *const NSAccessibilitySelectedTextRangeAttribute =
+    @"NSAccessibilitySelectedTextRangeAttribute";
+NSString *const NSAccessibilityShowMenuAction = @"NSAccessibilityShowMenuAction";
+NSString *const NSAccessibilitySliderRole = @"NSAccessibilitySliderRole";
+NSString *const NSAccessibilitySplitGroupRole = @"NSAccessibilitySplitGroupRole";
+NSString *const NSAccessibilitySplitterRole = @"NSAccessibilitySplitterRole";
+NSString *const NSAccessibilityStaticTextRole = @"NSAccessibilityStaticTextRole";
+NSString *const NSAccessibilityStringForRangeParameterizedAttribute =
+    @"NSAccessibilityStringForRangeParameterizedAttribute";
+NSString *const NSAccessibilityStyleRangeForIndexParameterizedAttribute =
+    @"NSAccessibilityStyleRangeForIndexParameterizedAttribute";
+NSString *const NSAccessibilityTableRole = @"NSAccessibilityTableRole";
+NSString *const NSAccessibilityTextAreaRole = @"NSAccessibilityTextAreaRole";
+NSString *const NSAccessibilityTextFieldRole = @"NSAccessibilityTextFieldRole";
+NSString *const NSAccessibilityTitleChangedNotification = @"NSAccessibilityTitleChangedNotification";
+NSString *const NSAccessibilityToolbarRole = @"NSAccessibilityToolbarRole";
+NSString *const NSAccessibilityUIElementDestroyedNotification =
+    @"NSAccessibilityUIElementDestroyedNotification";
+NSString *const NSAccessibilityUnignoredAncestor = @"NSAccessibilityUnignoredAncestor";
+NSString *const NSAccessibilityUnignoredChildren = @"NSAccessibilityUnignoredChildren";
+NSString *const NSAccessibilityUnignoredChildrenForOnlyChild =
+    @"NSAccessibilityUnignoredChildrenForOnlyChild";
+NSString *const NSAccessibilityUnknownRole = @"NSAccessibilityUnknownRole";
+NSString *const NSAccessibilityValueAttribute = @"NSAccessibilityValueAttribute";
+NSString *const NSAccessibilityValueChangedNotification = @"NSAccessibilityValueChangedNotification";
+NSString *const NSAccessibilityValueIndicatorRole = @"NSAccessibilityValueIndicatorRole";
+NSString *const NSAccessibilityWindowRole = @"NSAccessibilityWindowRole";
+NSString *const NSApplicationDidChangeScreenParametersNotification =
+    @"NSApplicationDidChangeScreenParametersNotification";
+NSString *const NSApplicationWillBecomeActiveNotification =
+    @"NSApplicationWillBecomeActiveNotification";
+NSString *const NSApplicationWillResignActiveNotification =
+    @"NSApplicationWillResignActiveNotification";
+NSString *const NSColorPanelColorDidChangeNotification = @"NSColorPanelColorDidChangeNotification";
+NSString *const NSColorPboardType = @"NSColorPboardType";
+NSString *const NSFileContentsPboardType = @"NSFileContentsPboardType";
+NSString *const NSFilenamesPboardType = @"NSFilenamesPboardType";
+NSString *const NSFilesPromisePboardType = @"NSFilesPromisePboardType";
+NSString *const NSFontPboardType = @"NSFontPboardType";
+NSString *const NSHTMLPboardType = @"NSHTMLPboardType";
+NSString *const NSImageNameApplicationIcon = @"NSImageNameApplicationIcon";
+NSString *const NSInkTextPboardType = @"NSInkTextPboardType";
+NSString *const NSMultipleTextSelectionPboardType = @"NSMultipleTextSelectionPboardType";
+NSString *const NSPDFPboardType = @"NSPDFPboardType";
+NSString *const NSPostScriptPboardType = @"NSPostScriptPboardType";
+NSString *const NSPreferredScrollerStyleDidChangeNotification =
+    @"NSPreferredScrollerStyleDidChangeNotification";
+NSString *const NSRTFDPboardType = @"NSRTFDPboardType";
+NSString *const NSRTFPboardType = @"NSRTFPboardType";
+NSString *const NSRulerPboardType = @"NSRulerPboardType";
+NSString *const NSStringPboardType = @"NSStringPboardType";
+NSString *const NSSystemColorsDidChangeNotification = @"NSSystemColorsDidChangeNotification";
+NSString *const NSTIFFPboardType = @"NSTIFFPboardType";
+NSString *const NSTabularTextPboardType = @"NSTabularTextPboardType";
+NSString *const NSTextInputContextKeyboardSelectionDidChangeNotification =
+    @"NSTextInputContextKeyboardSelectionDidChangeNotification";
+NSString *const NSURLPboardType = @"NSURLPboardType";
+NSString *const NSVCardPboardType = @"NSVCardPboardType";
+NSString *const NSWindowDidChangeBackingPropertiesNotification =
+    @"NSWindowDidChangeBackingPropertiesNotification";
+NSString *const NSWindowDidChangeScreenNotification = @"NSWindowDidChangeScreenNotification";
+NSString *const NSWindowDidEndLiveResizeNotification = @"NSWindowDidEndLiveResizeNotification";
+NSString *const NSWindowDidEnterFullScreenNotification = @"NSWindowDidEnterFullScreenNotification";
+NSString *const NSWindowDidExitFullScreenNotification = @"NSWindowDidExitFullScreenNotification";
+NSString *const NSWindowDidResizeNotification = @"NSWindowDidResizeNotification";
+NSString *const NSWindowDidUpdateNotification = @"NSWindowDidUpdateNotification";
+NSString *const NSWindowWillCloseNotification = @"NSWindowWillCloseNotification";
+NSString *const NSWindowWillStartLiveResizeNotification = @"NSWindowWillStartLiveResizeNotification";
+NSString *const NSWorkspaceDidWakeNotification = @"NSWorkspaceDidWakeNotification";
+NSString *const NSWorkspaceScreensDidSleepNotification = @"NSWorkspaceScreensDidSleepNotification";
+NSString *const NSWorkspaceScreensDidWakeNotification = @"NSWorkspaceScreensDidWakeNotification";
+NSString *const NSWorkspaceWillSleepNotification = @"NSWorkspaceWillSleepNotification";
+
+// AppKit reports its version as a double. Qt and Studio use it to pick macOS-era code paths; iOS 26
+// is far newer than Studio's deployment target, so answer macOS 11.
+double NSAppKitVersionNumber = 1811.0;
 
 void NSBeep(void) { AudioServicesPlaySystemSound(1104); }
 void NSApplicationLoad(void) { }
@@ -1780,9 +1912,20 @@ static void ms_log_guest_home(void) {
     if (!gRealGetpwuid || !gRealGetpwuid_r || !gRealGetpwnam || !gRealGetpwnam_r)
         studpad_log("guest home: libsystem_c's passwd functions are unreachable; lookups are served "
                     "from a synthesised entry");
-    if (home && access(home, W_OK) != 0)
-        studpad_log("guest home: %s is not writable (errno %d); Studio will not be able to save",
-                    home, errno);
+    if (home) {
+        // access(W_OK) is denied by the sandbox even though the directory is writable, so probe with
+        // a real create and remove instead of reporting a home Studio can actually use as broken.
+        char probe[PATH_MAX];
+        snprintf(probe, sizeof probe, "%s/.studpad-write-probe", home);
+        int fd = open(probe, O_CREAT | O_WRONLY, 0600);
+        if (fd >= 0) {
+            close(fd);
+            unlink(probe);
+        } else {
+            studpad_log("guest home: %s cannot be written (errno %d); Studio cannot save", home,
+                        errno);
+        }
+    }
 }
 static int ms_jit_enabled(void) {
     typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);

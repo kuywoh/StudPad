@@ -209,6 +209,8 @@ plan() {
     -I"$ROOT/shim" -Wno-deprecated-declarations)
   guard 300 "${cc[@]}" -c "$ROOT/shim/MacShim.m" -o "$WORK/MacShim.o"
   guard 300 "${cc[@]}" -c "$ROOT/shim/TISCompatibility.c" -o "$WORK/TISCompatibility.o"
+  guard 300 "${cc[@]}" -c "$ROOT/shim/LegacyCompatibility.c" -o "$WORK/LegacyCompatibility.o"
+  guard 300 "${cc[@]}" -c "$ROOT/shim/GuestHome.c" -o "$WORK/GuestHome.o"
 
   step "plan the stubs: what Studio needs that the iOS SDK does not export"
   local shipped=() lib
@@ -229,7 +231,7 @@ plan() {
     --guest "$APP/Frameworks/StudioKit" \
     --shipped "${shipped[@]}" \
     --reexport ${reexports[@]+"${reexports[@]}"} \
-    --have-object "$WORK/MacShim.o" "$WORK/TISCompatibility.o" \
+    --have-object "$WORK/MacShim.o" "$WORK/TISCompatibility.o" "$WORK/LegacyCompatibility.o" "$WORK/GuestHome.o" \
     --stubs "$WORK/stubs.c" \
     --objc "$WORK/stubs_objc.m" \
     --reroute "$WORK/reroute.txt" \
@@ -257,7 +259,8 @@ retarget2() {
 
 link() {
   step "compile the shim sources"
-  local sources=("$ROOT/shim/TISCompatibility.c" "$WORK/stubs.c" "$WORK/stubs_objc.m")
+  local sources=("$ROOT/shim/TISCompatibility.c" "$ROOT/shim/LegacyCompatibility.c"
+    "$ROOT/shim/GuestHome.c" "$WORK/stubs.c" "$WORK/stubs_objc.m")
   [ -f "$WORK/stubs_asm.s" ] && sources+=("$WORK/stubs_asm.s")
   wc -l "${sources[@]}" || true
   local cc=(xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -c -fobjc-arc -O1

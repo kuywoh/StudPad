@@ -17,6 +17,7 @@
 // per symbol the iOS SDK does not export.
 
 #import "MacShim.h"
+#import "GuestHome.h"
 #import "InputBridge.h"
 
 #import <UIKit/UIKit.h>
@@ -1706,9 +1707,14 @@ static void ms_log_allocator(void) {
 // and getpwuid_r, QtCore getpwuid_r and QtWidgets getpwnam_r. iOS pins uid 501's pw_dir to
 // /var/mobile, so the guest's settings root becomes /var/mobile/Library/Roblox, the sandbox refuses
 // that mkdir, and Studio aborts before its first window ("boost::filesystem::create_directories:
-// Operation not permitted"). A sandboxed app owns its container instead and NSHomeDirectory() is
-// exactly that, so the current user's passwd home is rewritten to it here: every macOS-style
-// ~/Library path then resolves inside the container, which the app can write.
+// Operation not permitted").
+//
+// A sandboxed app owns its container, but the container root is not the right place for a guest's
+// home: iOS may refuse some of the Library paths Studio creates there, and a fixed probe name can
+// be left behind by a previous launch. Create a dedicated home under Application Support instead,
+// with every parent directory, then prove it is writable with a unique mkstemp name. HOME,
+// CFFIXED_USER_HOME and the current user's passwd entry all report that same directory, so Qt and
+// Studio cannot disagree about where `~` is.
 //
 // The interception is a __DATA,__interpose table, which dyld only reads from images loaded at
 // launch. libMacShim.dylib is one (the host links it), the same reason libmimalloc.3.dylib has to
@@ -1721,6 +1727,8 @@ static char gGuestHome[PATH_MAX];
 static char gGuestName[64];
 static char gSynthPasswdBuffer[PATH_MAX + 256];
 static struct passwd gSynthPasswd;
+static studpad_guest_home_status gGuestHomeStatus = STUDPAD_GUEST_HOME_INVALID;
+static int gGuestHomeErrno;
 static struct passwd *(*gRealGetpwuid)(uid_t);
 static int (*gRealGetpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
 static struct passwd *(*gRealGetpwnam)(const char *);
@@ -1730,13 +1738,49 @@ static int (*gRealGetpwnam_r)(const char *, struct passwd *, char *, size_t, str
 static __thread int tInsidePasswd;
 static __thread int tFindingHome;
 
+static BOOL ms_try_guest_home(NSString *base, NSString *component, const char *source) {
+    if (base.length == 0) return NO;
+    int error = 0;
+    gGuestHomeStatus = studpad_prepare_guest_home(
+        base.fileSystemRepresentation, component.fileSystemRepresentation, gGuestHome,
+        sizeof gGuestHome, &error);
+    gGuestHomeErrno = error;
+    if (gGuestHomeStatus != STUDPAD_GUEST_HOME_OK) {
+        studpad_log("guest home: %s (%s) failed: %s (errno %d)", base.fileSystemRepresentation,
+                    source, studpad_guest_home_status_name(gGuestHomeStatus), error);
+        gGuestHome[0] = '\0';
+        return NO;
+    }
+    if (setenv("HOME", gGuestHome, 1) != 0 || setenv("CFFIXED_USER_HOME", gGuestHome, 1) != 0)
+        studpad_log("guest home: prepared %s but could not pin HOME/CFFIXED_USER_HOME (errno %d)",
+                    gGuestHome, errno);
+    studpad_log("guest home: using %s (%s; write probe passed)", gGuestHome, source);
+    return YES;
+}
+
 static const char *ms_guest_home(void) {
     if (!gGuestHome[0] && !tFindingHome) {
         tFindingHome = 1;
-        NSString *home = NSHomeDirectory();
-        // Never redirect to "" or "/": an unwritable home would fail exactly like /var/mobile.
-        if (home.length > 1)
-            snprintf(gGuestHome, sizeof gGuestHome, "%s", home.fileSystemRepresentation);
+        // Application Support is the documented writable location, and it may not exist yet on a
+        // fresh container, so the helper creates it and every parent.
+        NSString *base = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                             NSUserDomainMask, YES).firstObject;
+        BOOL ready = ms_try_guest_home(base, @"StudPadStudio", "application support");
+        if (!ready) {
+            base = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+            ready = ms_try_guest_home(base, @"Application Support/StudPadStudio", "Library fallback");
+        }
+        if (!ready) {
+            // Last resort: the container root is still writable in the sandbox, and the
+            // create/probe below decides whether it really is. Never redirect to "" or "/".
+            base = NSHomeDirectory();
+            if (base.length > 1)
+                ready = ms_try_guest_home(base, @"StudPadStudio", "container fallback");
+        }
+        if (!ready)
+            studpad_log("guest home: no writable directory; leaving HOME and passwd unchanged. "
+                        "Studio's own ~/Library mkdir will probably be denied");
         tFindingHome = 0;
     }
     return gGuestHome[0] ? gGuestHome : NULL;
@@ -1908,36 +1952,31 @@ static const ms_interposer_t ms_passwd_interposers[] = {
 static void ms_log_guest_home(void) {
     ms_resolve_passwd();
     const char *home = ms_guest_home();
-    // Read the unredirected entry: the interposed getpwuid rewrites the entry in place.
-    struct passwd *before = gRealGetpwuid ? gRealGetpwuid(getuid()) : NULL;
+    if (!home) {
+        studpad_log("guest home: unavailable (%s, errno %d); HOME and passwd were not changed",
+                    studpad_guest_home_status_name(gGuestHomeStatus), gGuestHomeErrno);
+        return;
+    }
+
+    // ms_guest_home already pinned HOME and CFFIXED_USER_HOME. Read them back together with the
+    // interposed passwd entry: all three are what Qt, Foundation and Studio actually consult.
+    struct passwd *entry = ms_getpwuid(getuid());
+    const char *passwdHome = entry && entry->pw_dir ? entry->pw_dir : "unavailable";
     const char *envHome = getenv("HOME");
-    studpad_log("guest home: %s", home ? home : "unavailable");
-    studpad_log("guest home: passwd home was %s, HOME was %s, uid %u",
-                before && before->pw_dir ? before->pw_dir : "unreachable",
-                envHome ? envHome : "unset", (unsigned)getuid());
-    // Qt asks HOME before it falls back to passwd, and Foundation prefers CFFIXED_USER_HOME to the
-    // container: pin both to the same directory so every home lookup the guest makes agrees.
-    if (home) {
-        setenv("HOME", home, 1);
-        setenv("CFFIXED_USER_HOME", home, 1);
+    const char *fixedHome = getenv("CFFIXED_USER_HOME");
+    studpad_log("guest home: %s", home);
+    studpad_log("guest home: HOME=%s CFFIXED_USER_HOME=%s passwd=%s (uid %u)",
+                envHome ? envHome : "unset", fixedHome ? fixedHome : "unset", passwdHome,
+                (unsigned)getuid());
+    if (!envHome || !fixedHome || strcmp(home, envHome) != 0 || strcmp(home, fixedHome) != 0 ||
+        strcmp(home, passwdHome) != 0) {
+        studpad_log("guest home: INCONSISTENT home lookups: Studio and Qt can resolve ~ differently");
+    } else {
+        studpad_log("guest home: HOME, CFFIXED_USER_HOME and passwd agree");
     }
     if (!gRealGetpwuid || !gRealGetpwuid_r || !gRealGetpwnam || !gRealGetpwnam_r)
         studpad_log("guest home: libsystem_c's passwd functions are unreachable; lookups are served "
                     "from a synthesised entry");
-    if (home) {
-        // access(W_OK) is denied by the sandbox even though the directory is writable, so probe with
-        // a real create and remove instead of reporting a home Studio can actually use as broken.
-        char probe[PATH_MAX];
-        snprintf(probe, sizeof probe, "%s/.studpad-write-probe", home);
-        int fd = open(probe, O_CREAT | O_WRONLY, 0600);
-        if (fd >= 0) {
-            close(fd);
-            unlink(probe);
-        } else {
-            studpad_log("guest home: %s cannot be written (errno %d); Studio cannot save", home,
-                        errno);
-        }
-    }
 }
 static int ms_jit_enabled(void) {
     typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);

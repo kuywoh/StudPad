@@ -49,6 +49,10 @@ jobs:
           .work/test_input_bridge
           cc -std=c11 -Wall -Wextra -Werror -pthread -Ishim shim/TISCompatibility.c tools/test_tis_compatibility.c -framework CoreFoundation -o .work/test_tis_compatibility
           .work/test_tis_compatibility
+          cc -std=c11 -Wall -Wextra -Werror -Ishim shim/GuestHome.c tools/test_guest_home.c -o .work/test_guest_home
+          .work/test_guest_home
+          cc -std=c11 -Wall -Wextra -Werror -Ishim shim/LegacyCompatibility.c tools/test_legacy_compatibility.c -framework CoreFoundation -framework CoreGraphics -o .work/test_legacy_compatibility
+          .work/test_legacy_compatibility
           cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -pthread -Iapp app/sha256_file.c tools/test_sha256_file.c -o .work/test_sha256_file
           .work/test_sha256_file
           python3 -m unittest tools.test_sideload_entitlements tools.test_studio_manifest tools.test_zip_resources tools.test_plan_shim tools.test_appkit_private_selector tools.test_check_binds tools.test_ios_retarget tools.test_studio_verify tools.test_macho_interpose

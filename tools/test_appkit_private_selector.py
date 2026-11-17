@@ -77,6 +77,10 @@ class MSColorCompatibilityTests(unittest.TestCase):
 
         self.assertIn("- (NSInteger)type { return 0; }", implementation)
         self.assertIn(
+            "- (NSString *)colorSpaceName { return (__bridge NSString *)NSDeviceRGBColorSpace; }",
+            implementation,
+        )
+        self.assertIn(
             "NSString *spaceName = [name isKindOfClass:NSString.class] ? name : nil;",
             implementation,
         )

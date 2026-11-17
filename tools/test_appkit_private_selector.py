@@ -44,7 +44,7 @@ class AppKitMenuItemCompatibilityTests(unittest.TestCase):
             encoding="utf-8"
         )
         start = source.index("@implementation NSMenuItem")
-        end = source.index("\\n@end", start)
+        end = source.index("@end", start)
         implementation = source[start:end]
 
         self.assertIn("BOOL _msSeparatorItem;", source)

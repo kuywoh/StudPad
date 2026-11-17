@@ -84,6 +84,21 @@ def inspect(data):
     return dict(filetype=filetype, platform=platform, has_main=has_main, id=install_id, loads=loads)
 
 
+def validate_device_family(plist):
+    """Refuse an IPA iPadOS would run as an iPhone app.
+
+    Without 2 (iPad) in UIDeviceFamily the app installs as iPhone-only, and iPadOS presents it in
+    compatibility mode with a 320x480 canvas. Build 97 logged exactly that screen size from Qt, so
+    Studio had a letterboxed display instead of the iPad's.
+    """
+    family = plist.get("UIDeviceFamily")
+    if not isinstance(family, list) or 2 not in family:
+        fail(
+            f"UIDeviceFamily is {family!r}: 2 (iPad) is required, or iPadOS runs the app "
+            "letterboxed in a 320x480 iPhone canvas"
+        )
+
+
 def validate_bundle_version(plist, expected=None):
     version = plist.get("CFBundleVersion")
     if not isinstance(version, str) or not version.strip():
@@ -146,11 +161,13 @@ def main():
     # and iOS reports /var/mobile there; the sandbox then refuses Studio's ~/Library/Roblox mkdir.
     # The shim interposes those calls to report the app container, so the tuples must be in the
     # shipped dylib: dyld only reads __interpose from launch images, and the host links the shim.
-    passwd_interposers = active_interpose_tuple_count(z.read(SHIM))
-    if passwd_interposers < 4:
+    # exit() is interposed as well: it is the only marker that says Studio quit instead of crashing.
+    shim_interposers = active_interpose_tuple_count(z.read(SHIM))
+    if shim_interposers < 5:
         fail(
-            f"shim has {passwd_interposers} active __interpose tuple(s); the passwd home "
-            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r "
+            f"shim has {shim_interposers} active __interpose tuple(s); the passwd home "
+            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r, and the exit "
+            "marker needs exit "
         )
 
     host_data = z.read(HOST)
@@ -174,6 +191,7 @@ def main():
     if plist.get("CFBundleIdentifier") != "com.kuywoh.studpadstudio":
         fail(f"unexpected CFBundleIdentifier: {plist.get('CFBundleIdentifier')!r}")
     validate_bundle_version(plist, os.environ.get("GITHUB_RUN_NUMBER"))
+    validate_device_family(plist)
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off: the log would not be readable")
     if "UIApplicationSceneManifest" not in plist:
@@ -201,7 +219,7 @@ def main():
         f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
         f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples) and a host "
         f"launch load command; shim {len(shim['loads'])} re-exported frameworks and "
-        f"{passwd_interposers} passwd interposer(s); "
+        f"{shim_interposers} interposer(s); "
         f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
         f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )

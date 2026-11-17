@@ -81,12 +81,32 @@ memory: 1234 MB available to this process      # current headroom; not the per-a
 allocator: malloc(64) -> mimalloc heap …       # libsystem_malloc here means Qt and Studio mix heaps
 guest home: /var/mobile/Containers/Data/…/    # Studio's ~; the line below says what it used to be
 dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
+screen: UIScreen bounds 1024x1366 pt …         # 320x480 here means iPhone compatibility mode
+screen: NSScreen frame 1024x1366 pt …          # what Qt's cocoa plugin uses for its screen
 calling Studio main
 [shim] NSColor extended: … palette method(s)  # AppKit's colour palette, answered over UIKit
 [shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window
-[stub] … / [miss] -[NSView …]                 # the next API to implement
+[alert] runModal: style=0 buttons=[OK] message="…" informative="…" from libqcocoa…
+[stub] … / [miss] -[NSView …] from StudioKit… # the next API to implement, with its caller
 [miss] +[NSColor …]                           # an AppKit class method nobody implements yet
+[miss] … repeated 3742 times …                # one line per event, not one per call
+[log] … repeated 3742 time(s) in total        # written when the process ends
+[shim] exit marker: atexit ran | exit(0) …    # absent means a signal or a kill
+Studio main returned 0 (stub calls: …)        # absent with the markers above means it is still running
 ```
+
+A repeated selector used to print a line per call: build 97 logged `-[NSAlert setMessageText:]`
+3,742 times and nothing else. Each distinct miss or dialog is now described once — with the caller
+and the value that identifies it — and only counted afterwards. Qt's dialogs are real: the shim
+implements the AppKit dialog API over `UIAlertController`, answers `runModal` with the default
+button rather than blocking Studio's launch, and shows the first three over Studio's window so the
+text is readable on the device. When a launch ends on its own, the log now says which way: an
+`exit()` line, an `atexit` line, the host's crash file for a signal, a memory warning before a
+jetsam kill, or none of those for a kill.
+
+Studio needs the iPad's own canvas. `UIDeviceFamily` in `Info.plist` lists iPads, and `verify.py`
+refuses a build without it: an iPhone-only app runs letterboxed in a 320x480 canvas, which is
+exactly the `QRect(0,0 320x480)` build 97's Qt reported.
 
 The setup screen reports memory entitlement and debugger state. Touch, keyboard and rendering still
 need device verification. The shim can host a layer supplied by Qt or Studio, but that does not
@@ -103,7 +123,7 @@ To fall back to Qt's offscreen platform (no window, log only), write
 | `tools/ios_retarget.py` | Platform/path/shim rewrite, `MH_EXECUTE`→`MH_DYLIB`, duplicate and ordinal handling |
 | `tools/plan_shim.py` | Works out which symbols iOS lacks and generates logging stubs + the reroute list |
 | `tools/check_binds.py` | Reads every bind from the Mach-O itself; refuses a build the shim cannot satisfy, and lists the frameworks to re-export |
-| `shim/MacShim.m` | UIKit-backed `NSApplication`/`NSWindow`/`NSView`, drawing and event bridge, `MSStubObject`, guest loader, JIT/memory probe, logging |
+| `shim/MacShim.m` | UIKit-backed `NSApplication`/`NSWindow`/`NSView`/`NSAlert`, drawing and event bridge, `MSStubObject`, guest loader, JIT/memory probe, counted logging |
 | `app/starter.m`, `app/Info.plist` | The UIKit host app and its bundle |
 | `app/entitlements-sideload.plist` | What the IPA asks for: memory limit, extended addressing, `get-task-allow` |
 | `studio/build.sh`, `studio/verify.py` | The pipeline and its packaging check |

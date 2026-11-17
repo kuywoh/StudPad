@@ -122,22 +122,77 @@ class CocoaDisplayCompatibilityTests(unittest.TestCase):
 
 
 class AppKitAlertCompatibilityTests(unittest.TestCase):
-    def test_nsalert_style_setter_uses_a_typed_runtime_implementation(self):
-        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+    def setUp(self):
+        self.source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "static void ms_nsalert_set_style(id self, SEL _cmd, NSInteger style)",
-            source,
-        )
-        self.assertIn(
-            'class_replaceMethod(cls, sel_registerName("setAlertStyle:"),',
-            source,
-        )
-        self.assertIn('(IMP)ms_nsalert_set_style, "v@:q");', source)
-        start = source.index("@implementation MSStubObject")
-        end = source.index("\n@end", start)
-        self.assertIn("ms_install_appkit_alerts();", source[start:end])
+        start = self.source.index("@implementation NSAlert")
+        self.alert = self.source[start : self.source.index("\n@end", start)]
+
+    def test_nsalert_is_a_real_class_implementing_the_dialog_api(self):
+        # A generated MSStubObject answers one missing setter at a time; the callers configure the
+        # whole dialog, so the class has to implement the whole surface they use.
+        self.assertIn("@interface NSAlert : MSStubObject {", self.source)
+        for selector in (
+            "- (void)setMessageText:(NSString *)text {",
+            "- (NSString *)messageText { return _msMessageText; }",
+            "- (void)setInformativeText:(NSString *)text {",
+            "- (void)setAlertStyle:(NSInteger)style { _msAlertStyle = style; }",
+            "- (MSAlertButton *)addButtonWithTitle:(NSString *)title {",
+            "- (NSArray *)buttons {",
+            "- (NSInteger)runModal {",
+            "- (void)beginSheetModalForWindow:(id)window completionHandler:(void (^)(NSInteger))handler {",
+        ):
+            self.assertIn(selector, self.alert)
+
+    def test_run_modal_answers_with_the_default_button_instead_of_blocking(self):
+        # Studio's launch must not wait for a tap Qt never asks the user for.
+        self.assertIn("return MS_ALERT_FIRST_BUTTON;", self.alert)
+        self.assertIn("#define MS_ALERT_FIRST_BUTTON 1000", self.source)
+        run_modal = self.alert[
+            self.alert.index("- (NSInteger)runModal {") : self.alert.index("beginSheetModalForWindow")
+        ]
+        self.assertNotIn("ms_pump", run_modal)
+        self.assertNotIn("while", run_modal)
+
+    def test_every_alert_is_logged_with_its_text_and_caller(self):
+        # What build 97 could not answer: what the dialog said, and who showed it.
+        self.assertIn(r'message=\"%@\" informative=\"%@\"', self.alert)
+        self.assertIn("[titles componentsJoinedByString:@\" | \"]", self.alert)
+        self.assertIn("ms_describe_caller(caller, sizeof caller);", self.alert)
+        self.assertIn('ms_log_alert(@"runModal", [self ms_summaryFor:@"runModal"]);', self.alert)
+        # A storm of dialogs is counted the same way a repeated miss is.
+        self.assertIn("static void ms_log_alert(NSString *action, NSString *summary) {", self.source)
+        self.assertIn("if (index <= MS_ALERT_SUMMARIES) {", self.source)
+
+    def test_dialog_setters_and_misses_are_counted_not_repeated(self):
+        self.assertIn("static void ms_log_event(const char *key, NSString *detail) {", self.source)
+        self.assertIn("static int ms_event_count(const char *key, long *total) {", self.source)
+        self.assertIn("static void ms_flush_event_counts(void) {", self.source)
+        self.assertIn('ms_log_event("[alert] -[NSAlert setMessageText:]"', self.alert)
+        self.assertIn('ms_log_event("[alert] -[NSAlert addButtonWithTitle:]"', self.alert)
+        # Every place that used to print a miss line has to go through the counted path.
+        claim = self.source[self.source.index("+ (BOOL)ms_claim:(") :]
+        claim = claim[: claim.index("\n}")]
+        self.assertIn("ms_log_event(key, nil);", claim)
+        self.assertNotIn('studpad_log("[miss]', self.source)
+        for message in ("repeated %ld times", "repeated %ld time(s) in total"):
+            self.assertIn(message, self.source)
+
+    def test_a_silent_end_still_says_how_the_process_ended(self):
+        self.assertIn("atexit(ms_log_atexit_marker);", self.source)
+        self.assertIn('studpad_log("[shim] exit marker: exit(%d) called from Studio", status);',
+                      self.source)
+        self.assertIn("{(const void *)ms_exit, (const void *)exit},", self.source)
+        self.assertIn("returned %d (stub calls: %ld)", self.source)
+
+    def test_screen_geometry_is_reported_and_compatibility_mode_is_named(self):
+        self.assertIn("static void ms_log_screen_geometry(void) {", self.source)
+        self.assertIn("UIScreen bounds %.0fx%.0f pt, native %.0fx%.0f px, scale %.2f/%.2f",
+                      self.source)
+        self.assertIn("[appKitScreen backingScaleFactor]", self.source)
+        self.assertIn("iPhone compatibility", self.source)
+        self.assertIn("ms_log_screen_geometry();", self.source)
 
 
 class AppKitMenuItemCompatibilityTests(unittest.TestCase):

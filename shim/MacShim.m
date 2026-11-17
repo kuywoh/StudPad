@@ -31,6 +31,7 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <pthread.h>
 #import <pwd.h>
 #import <stdio.h>
 #import <fcntl.h>
@@ -135,6 +136,114 @@ void *studpad_stub_asm(void) {
 }
 
 long studpad_stub_count(void) { return gStubTotal; }
+
+// ---------------------------------------------------------------------------------------------
+// Repeated events
+// ---------------------------------------------------------------------------------------------
+//
+// One repeated call can fill the log: build 97 printed -[NSAlert setMessageText:] 3,742 times,
+// which is why nothing that explained the launch was left in it. Each distinct event is described
+// once, with the caller and the value that identifies it; repeats are only counted, summarised at
+// 10, 100, 1000 and every 10000 calls, and flushed as totals when the process ends.
+
+#define MS_EVENT_SLOTS 256
+#define MS_EVENT_KEY 192
+
+typedef struct {
+    char key[MS_EVENT_KEY];
+    long count;
+} ms_event_slot;
+
+static ms_event_slot gEventSlots[MS_EVENT_SLOTS];
+static int gEventSlotCount;
+static int gEventTableFullLogged;
+static pthread_mutex_t gEventMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// "image`symbol+0x1a4" for the first frame outside the shim. StudioKit and the Qt plugins are
+// stripped in places, so the image name and the image-relative offset are what always resolves.
+static void ms_describe_caller(char *out, size_t size) {
+    out[0] = '\0';
+    void *frames[24];
+    int count = backtrace(frames, (int)(sizeof frames / sizeof frames[0]));
+    for (int i = 1; i < count; i++) {
+        Dl_info info;
+        if (!dladdr(frames[i], &info) || !info.dli_fname) continue;
+        const char *image = strrchr(info.dli_fname, '/');
+        image = image ? image + 1 : info.dli_fname;
+        if (strcmp(image, "libMacShim.dylib") == 0) continue;
+        unsigned long offset = (unsigned long)((uintptr_t)frames[i] - (uintptr_t)info.dli_fbase);
+        snprintf(out, size, "%s%s%s+%#lx", image, info.dli_sname ? "`" : "",
+                 info.dli_sname ? info.dli_sname : "", offset);
+        return;
+    }
+    snprintf(out, size, "an unresolved frame");
+}
+
+// 1 on the first occurrence of key, 2 when a repeat summary is due, 0 when it is only counted.
+static int ms_event_count(const char *key, long *total) {
+    int status = 0;
+    pthread_mutex_lock(&gEventMutex);
+    ms_event_slot *slot = NULL;
+    for (int i = 0; i < gEventSlotCount; i++) {
+        if (strcmp(gEventSlots[i].key, key) == 0) {
+            slot = &gEventSlots[i];
+            break;
+        }
+    }
+    if (!slot && gEventSlotCount < MS_EVENT_SLOTS) {
+        slot = &gEventSlots[gEventSlotCount++];
+        snprintf(slot->key, sizeof slot->key, "%s", key);
+        status = 1;
+    }
+    if (slot) {
+        slot->count++;
+        if (total) *total = slot->count;
+        if (status == 0 &&
+            (slot->count == 10 || slot->count == 100 || slot->count == 1000 ||
+             slot->count % 10000 == 0))
+            status = 2;
+    } else {
+        // Still describe a new event: it is rare enough to be worth a full line. Counting it is
+        // what the table cannot do any more, and that is said exactly once.
+        status = 1;
+        if (!gEventTableFullLogged) {
+            gEventTableFullLogged = 1;
+            studpad_log("[log] %d distinct events recorded; further events are described but not "
+                        "counted",
+                        MS_EVENT_SLOTS);
+        }
+    }
+    pthread_mutex_unlock(&gEventMutex);
+    return status;
+}
+
+// The totals are the only record of how often a stub or a dialog was hit, so they are written when
+// the process ends as well as summarised while it runs.
+static void ms_flush_event_counts(void) {
+    pthread_mutex_lock(&gEventMutex);
+    for (int i = 0; i < gEventSlotCount; i++) {
+        if (gEventSlots[i].count < 2) continue;
+        char key[MS_EVENT_KEY];
+        snprintf(key, sizeof key, "%s", gEventSlots[i].key);
+        long count = gEventSlots[i].count;
+        studpad_log("[log] %s repeated %ld time(s) in total", key, count);
+    }
+    pthread_mutex_unlock(&gEventMutex);
+}
+
+static void ms_log_event(const char *key, NSString *detail) {
+    long total = 0;
+    int status = ms_event_count(key, &total);
+    if (status == 1) {
+        char caller[256];
+        ms_describe_caller(caller, sizeof caller);
+        const char *text = detail.UTF8String;
+        studpad_log("%s from %s%s%s", key, caller, text && *text ? " " : "",
+                    text && *text ? text : "");
+    } else if (status == 2) {
+        studpad_log("%s repeated %ld times; the first call is the one described", key, total);
+    }
+}
 
 /*
  * Read a file without relying on NSData's legacy file initializer. Returns a retained CFDataRef;
@@ -277,18 +386,19 @@ static void ms_install_foundation_file_readers(void) {
 }
 
 static void ms_install_appkit_colors(void);
-static void ms_install_appkit_alerts(void);
 
 @implementation MSStubObject
 
 + (void)load {
     ms_install_foundation_file_readers();
     ms_install_appkit_colors();
-    ms_install_appkit_alerts();
 }
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
-    studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(self), sel_getName(sel));
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(self),
+             sel_getName(sel));
+    ms_log_event(key, nil);
     if (isClass ? class_getClassMethod(self, sel) : class_getInstanceMethod(self, sel)) return NO;
     Class target = isClass ? object_getClass(self) : self;
     return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "v@:");
@@ -318,8 +428,10 @@ static void ms_install_appkit_alerts(void);
 }
 
 - (void)forwardInvocation:(NSInvocation *)invocation {
-    studpad_log("[miss] -[%s %s]", class_getName(object_getClass(self)),
-                sel_getName(invocation.selector));
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[miss] -[%s %s]", class_getName(object_getClass(self)),
+             sel_getName(invocation.selector));
+    ms_log_event(key, @"(forwarded: no method signature)");
     NSUInteger length = invocation.methodSignature.methodReturnLength;
     if (length) {
         void *zero = calloc(1, length);
@@ -329,33 +441,215 @@ static void ms_install_appkit_alerts(void);
 }
 
 + (void)doesNotRecognizeSelector:(SEL)sel {
-    studpad_log("[miss] +[%s %s]", class_getName(self), sel_getName(sel));
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[miss] +[%s %s]", class_getName(self), sel_getName(sel));
+    ms_log_event(key, nil);
 }
 
 @end
 
-// Qt's Cocoa message dialog sends this AppKit setter; iOS may expose NSAlert without it.
-// Install a correctly typed no-op so repeated dialog setup does not fall into generic forwarding.
-static void ms_nsalert_set_style(id self, SEL _cmd, NSInteger style) {
-    (void)self;
-    (void)_cmd;
-    (void)style;
-}
+// ---------------------------------------------------------------------------------------------
+// NSAlert: AppKit's message dialog over UIAlertController
+// ---------------------------------------------------------------------------------------------
+//
+// Qt's cocoa plugin builds its dialogs (and the errors it shows while starting a platform plugin)
+// out of NSAlert. iOS has no NSAlert, so build 97's class was a generated MSStubObject and every
+// -setMessageText: fell into the generic missing-selector path: 3,742 identical lines that named
+// neither the dialog's text nor the code showing it. Answering one setter at a time only reveals
+// the next one, so the dialog API a caller actually uses is implemented here, and every dialog is
+// logged with its message, its buttons and its caller.
+//
+// -runModal cannot block: Studio's launch would stall on a tap that Qt never asks for. It reports
+// the default button as pressed (AppKit's NSAlertFirstButtonReturn) and shows the dialog over
+// Studio's window, best effort, so the text is also readable on the device.
 
-static void ms_install_appkit_alerts(void) {
-    Class cls = objc_lookUpClass("NSAlert");
-    if (!cls) {
-        cls = objc_allocateClassPair([MSStubObject class], "NSAlert", 0);
-        if (cls) objc_registerClassPair(cls);
-    }
-    if (!cls) {
-        studpad_log("[shim] could not install NSAlert style compatibility");
+#define MS_ALERT_FIRST_BUTTON 1000  // NSAlertFirstButtonReturn
+#define MS_ALERT_MAX_PRESENTED 3
+
+@interface MSAlertButton : MSStubObject
+@property(nonatomic, copy) NSString *title;
+@end
+
+@implementation MSAlertButton
+@end
+
+@interface NSAlert : MSStubObject {
+    NSString *_msMessageText;
+    NSString *_msInformativeText;
+    NSMutableArray *_msButtons;
+    id _msIcon;
+    id _msDelegate;
+    id _msAccessoryView;
+    NSString *_msHelpAnchor;
+    NSInteger _msAlertStyle;
+    BOOL _msShowsHelp;
+    BOOL _msShowsSuppressionButton;
+}
+@end
+
+// A dialog storm must not become a log storm. The first dialogs are described in full, which is
+// what identifies them, and a repeated one is counted like any other event.
+#define MS_ALERT_SUMMARIES 5
+
+static int gAlertSummaries;
+// Presentation is capped across the whole process, not per alert: a caller that builds a new alert
+// per retry would otherwise stack thousands of them over Studio.
+static int gAlertPresentations;
+
+static void ms_log_alert(NSString *action, NSString *summary) {
+    int index = __atomic_add_fetch(&gAlertSummaries, 1, __ATOMIC_RELAXED);
+    if (index <= MS_ALERT_SUMMARIES) {
+        studpad_log("[alert] %s", summary.UTF8String);
         return;
     }
-    class_replaceMethod(cls, sel_registerName("setAlertStyle:"),
-                        (IMP)ms_nsalert_set_style, "v@:q");
-    studpad_log("[shim] NSAlert setAlertStyle: compatibility active");
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[alert] %s", action.UTF8String);
+    ms_log_event(key, summary);
 }
+
+static UIViewController *ms_top_view_controller(void) {
+    UIWindow *key = UIApplication.sharedApplication.keyWindow;
+    if (!key) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                if (window.isKeyWindow) {
+                    key = window;
+                    break;
+                }
+            }
+            if (!key) key = windowScene.windows.firstObject;
+            if (key) break;
+        }
+    }
+    UIViewController *controller = key.rootViewController;
+    while (controller.presentedViewController) controller = controller.presentedViewController;
+    return controller;
+}
+
+@implementation NSAlert
+
+- (id)init {
+    if ((self = [super init])) _msButtons = [NSMutableArray new];
+    return self;
+}
+
+- (void)setMessageText:(NSString *)text {
+    _msMessageText = [text copy];
+    ms_log_event("[alert] -[NSAlert setMessageText:]",
+                 [NSString stringWithFormat:@"text=\"%@\"", _msMessageText ?: @""]);
+}
+- (NSString *)messageText { return _msMessageText; }
+
+- (void)setInformativeText:(NSString *)text {
+    _msInformativeText = [text copy];
+    ms_log_event("[alert] -[NSAlert setInformativeText:]",
+                 [NSString stringWithFormat:@"text=\"%@\"", _msInformativeText ?: @""]);
+}
+- (NSString *)informativeText { return _msInformativeText; }
+
+- (void)setAlertStyle:(NSInteger)style { _msAlertStyle = style; }
+- (NSInteger)alertStyle { return _msAlertStyle; }
+
+- (MSAlertButton *)addButtonWithTitle:(NSString *)title {
+    if (!_msButtons) _msButtons = [NSMutableArray new];
+    MSAlertButton *button = [MSAlertButton new];
+    button.title = title ?: @"";
+    [_msButtons addObject:button];
+    ms_log_event("[alert] -[NSAlert addButtonWithTitle:]",
+                 [NSString stringWithFormat:@"title=\"%@\" (button %lu)", button.title,
+                                            (unsigned long)_msButtons.count]);
+    return button;
+}
+- (NSArray *)buttons { return _msButtons ? [_msButtons copy] : @[]; }
+
+- (void)setIcon:(id)icon { _msIcon = icon; }
+- (id)icon { return _msIcon; }
+- (void)setDelegate:(id)delegate { _msDelegate = delegate; }
+- (id)delegate { return _msDelegate; }
+- (void)setAccessoryView:(id)view { _msAccessoryView = view; }
+- (id)accessoryView { return _msAccessoryView; }
+- (void)setShowsHelp:(BOOL)shows { _msShowsHelp = shows; }
+- (BOOL)showsHelp { return _msShowsHelp; }
+- (void)setHelpAnchor:(NSString *)anchor { _msHelpAnchor = [anchor copy]; }
+- (NSString *)helpAnchor { return _msHelpAnchor; }
+- (void)setShowsSuppressionButton:(BOOL)shows { _msShowsSuppressionButton = shows; }
+- (BOOL)showsSuppressionButton { return _msShowsSuppressionButton; }
+- (id)suppressionButton { return nil; }
+// AppKit creates the alert's panel when it is laid out; callers that ask first get nil there too.
+- (id)window { return nil; }
+- (void)layout { }
+
+- (NSString *)ms_summaryFor:(NSString *)action {
+    NSMutableArray *titles = [NSMutableArray array];
+    for (MSAlertButton *button in _msButtons) {
+        [titles addObject:button.title.length ? button.title : @"(untitled)"];
+    }
+    char caller[256];
+    ms_describe_caller(caller, sizeof caller);
+    return [NSString
+        stringWithFormat:@"%@: style=%ld buttons=[%@] message=\"%@\" informative=\"%@\" from %s",
+                         action, (long)_msAlertStyle, [titles componentsJoinedByString:@" | "],
+                         _msMessageText ?: @"", _msInformativeText ?: @"", caller];
+}
+
+- (void)ms_presentForAction:(NSString *)action {
+    int index = __atomic_add_fetch(&gAlertPresentations, 1, __ATOMIC_RELAXED);
+    if (index > MS_ALERT_MAX_PRESENTED) return;
+    UIAlertController *controller =
+        [UIAlertController alertControllerWithTitle:_msMessageText
+                                           message:_msInformativeText
+                                    preferredStyle:UIAlertControllerStyleAlert];
+    NSArray *buttons = self.buttons;
+    if (!buttons.count) {
+        [controller addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                       style:UIAlertActionStyleDefault
+                                                     handler:nil]];
+    }
+    for (NSUInteger index = 0; index < buttons.count; index++) {
+        NSString *title = ((MSAlertButton *)buttons[index]).title;
+        [controller addAction:[UIAlertAction actionWithTitle:title.length ? title : @"OK"
+                                                       style:UIAlertActionStyleDefault
+                                                     handler:^(UIAlertAction *chosen) {
+            studpad_log("[alert] %s dismissed with \"%s\" (button %lu)", action.UTF8String,
+                        chosen.title.UTF8String, (unsigned long)index);
+        }]];
+    }
+    void (^present)(void) = ^{
+        UIViewController *host = ms_top_view_controller();
+        if (!host) {
+            studpad_log("[alert] no view controller to present over; the dialog is in this log "
+                        "only");
+            return;
+        }
+        // Presenting while a dialog is still up is refused by UIKit and only adds a warning.
+        if (host.presentedViewController) return;
+        [host presentViewController:controller animated:NO completion:nil];
+    };
+    if (NSThread.isMainThread) present();
+    else dispatch_async(dispatch_get_main_queue(), present);
+}
+
+- (NSInteger)runModal {
+    ms_log_alert(@"runModal", [self ms_summaryFor:@"runModal"]);
+    [self ms_presentForAction:@"runModal"];
+    // The default button is reported as pressed instead of blocking the caller, so Studio keeps
+    // starting; the summary above says what the dialog wanted.
+    return MS_ALERT_FIRST_BUTTON;
+}
+
+- (void)beginSheetModalForWindow:(id)window completionHandler:(void (^)(NSInteger))handler {
+    (void)window;
+    ms_log_alert(@"beginSheetModalForWindow:",
+                 [self ms_summaryFor:@"beginSheetModalForWindow:"]);
+    [self ms_presentForAction:@"beginSheetModalForWindow:"];
+    if (!handler) return;
+    // Same reason as -runModal: the sheet is answered with its default button.
+    dispatch_async(dispatch_get_main_queue(), ^{ handler(MS_ALERT_FIRST_BUTTON); });
+}
+
+@end
 
 // ---------------------------------------------------------------------------------------------
 // NSColor: AppKit's palette over UIKit
@@ -538,7 +832,10 @@ static BOOL ms_nscolor_claim(id self, SEL _cmd, SEL sel, BOOL isClass) {
     // class_addMethod read and write through its object memory as if it were a class, which can
     // abort while Qt builds the palette.
     Class cls = isClass ? (Class)self : object_getClass(self);
-    studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(cls), sel_getName(sel));
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(cls),
+             sel_getName(sel));
+    ms_log_event(key, nil);
     Class target = isClass ? object_getClass(cls) : cls;
     if (class_getInstanceMethod(target, sel)) return NO;
     return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "@@:");
@@ -993,7 +1290,10 @@ static void ms_log_runtime_class_identity(const char *name) {
 
 // Log an unimplemented AppKit selector instead of raising. survivable by design here.
 - (void)doesNotRecognizeSelector:(SEL)selector {
-    studpad_log("[miss] -[%s %s]", class_getName(object_getClass(self)), sel_getName(selector));
+    char key[MS_EVENT_KEY];
+    snprintf(key, sizeof key, "[miss] -[%s %s]", class_getName(object_getClass(self)),
+             sel_getName(selector));
+    ms_log_event(key, nil);
 }
 
 // A touch becomes the NSEvent Qt expects. Coordinates are top-left (isFlipped YES), which is what
@@ -1338,9 +1638,15 @@ NSApplication *NSApp = nil;
     studpad_log("[shim] run: pumping the main run loop");
     [self finishLaunching];
     while (!_msShouldTerminate) ms_pump(0.05);
+    studpad_log("[shim] run: run loop stopped");
+    ms_flush_event_counts();
 }
 - (void)stop:(id)sender { (void)sender; _msShouldTerminate = YES; }
-- (void)terminate:(id)sender { (void)sender; _msShouldTerminate = YES; }
+- (void)terminate:(id)sender {
+    (void)sender;
+    studpad_log("[shim] NSApplication terminate requested; Studio is asking to quit");
+    _msShouldTerminate = YES;
+}
 - (id)nextEventMatchingMask:(unsigned long)mask untilDate:(id)date inMode:(id)mode
                     dequeue:(BOOL)dequeue {
     (void)mask; (void)date; (void)mode; (void)dequeue;
@@ -2083,12 +2389,46 @@ typedef struct {
     const void *replacee;
 } ms_interposer_t;
 
+// Studio's process can end three ways, and only one of them is visible today: a signal runs the
+// host's crash handler, and a return from Studio's main is logged, but an exit() called by Qt or
+// Studio leaves nothing behind. Build 29's log simply stopped. These markers make a silent end
+// tell what it was: an exit() line, an atexit line, or neither (which is a kill, e.g. a jetsam
+// report in Settings > Privacy & Security > Analytics Data).
+static void (*gRealExit)(int);
+static __thread int tInsideExit;
+
+static void ms_log_atexit_marker(void) {
+    studpad_log("[shim] exit marker: atexit ran, so the process ended through exit() rather than a "
+                "signal or a kill");
+    ms_flush_event_counts();
+}
+
+static void ms_exit(int status) {
+    if (!tInsideExit) {
+        tInsideExit = 1;
+        studpad_log("[shim] exit marker: exit(%d) called from Studio", status);
+        ms_flush_event_counts();
+    }
+    if (!gRealExit) gRealExit = (void (*)(int))ms_passwd_symbol("exit");
+    // A dlsym that came back through the interposition would recurse; _exit ends the process either
+    // way, and the marker has already been written by then.
+    if (gRealExit && gRealExit != ms_exit) gRealExit(status);
+    _exit(status);
+}
+
 __attribute__((used, section("__DATA,__interpose")))
 static const ms_interposer_t ms_passwd_interposers[] = {
     {(const void *)ms_getpwuid, (const void *)getpwuid},
     {(const void *)ms_getpwuid_r, (const void *)getpwuid_r},
     {(const void *)ms_getpwnam, (const void *)getpwnam},
     {(const void *)ms_getpwnam_r, (const void *)getpwnam_r},
+};
+
+// Terminates the process, so it can only add evidence: the line says Qt or Studio asked to quit
+// instead of leaving a log that just stops.
+__attribute__((used, section("__DATA,__interpose")))
+static const ms_interposer_t ms_exit_interposers[] = {
+    {(const void *)ms_exit, (const void *)exit},
 };
 
 static void ms_log_guest_home(void) {
@@ -2128,6 +2468,27 @@ static int ms_jit_enabled(void) {
     /* Match Henge's CS_OPS_STATUS check; CS_DEBUGGED persists after a debugger detaches. */
     if (csops(getpid(), 0u, &flags, sizeof(flags)) != 0) return -1;
     return (flags & UINT32_C(0x10000000)) ? 1 : 0;
+}
+
+// Qt's screen geometry comes straight from NSScreen, so what is reported here is what its cocoa
+// plugin will use. Build 97 reported QRect(0,0 320x480): the canvas iPadOS gives an iPhone-only
+// app in compatibility mode, not an iPad window.
+static void ms_log_screen_geometry(void) {
+    UIScreen *screen = UIScreen.mainScreen;
+    CGRect bounds = screen.bounds;
+    CGRect native = screen.nativeBounds;
+    NSScreen *appKitScreen = [NSScreen mainScreen];
+    CGRect frame = [appKitScreen frame];
+    studpad_log("screen: UIScreen bounds %.0fx%.0f pt, native %.0fx%.0f px, scale %.2f/%.2f",
+                bounds.size.width, bounds.size.height, native.size.width, native.size.height,
+                (double)screen.scale, (double)screen.nativeScale);
+    studpad_log("screen: NSScreen frame %.0fx%.0f pt, backing scale %.2f (Qt reads this)",
+                frame.size.width, frame.size.height, [appKitScreen backingScaleFactor]);
+    if (bounds.size.width < 1000.0 && bounds.size.height < 1000.0) {
+        studpad_log("screen: iPhone-sized canvas: iOS is running StudPad in iPhone compatibility "
+                    "mode, so Studio is letterboxed. Info.plist must list 2 (iPad) in "
+                    "UIDeviceFamily.");
+    }
 }
 
 static void ms_log_runtime_environment(void) {
@@ -2198,6 +2559,21 @@ void studpad_guest_start(void) {
     studpad_set_main_screen_bounds(mainScreen.bounds);
     studpad_log("[shim] CoreGraphics display %u: %.0f x %.0f points",
                 CGMainDisplayID(), mainScreen.bounds.size.width, mainScreen.bounds.size.height);
+    ms_log_screen_geometry();
+    // A memory warning is the last thing a jetsam kill leaves behind: the process gets no signal
+    // and runs no exit marker, so this line is the difference between "killed for memory" and
+    // "ended silently".
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *note) {
+        (void)note;
+        studpad_log("memory: UIKit memory warning with %.0f MB available; a kill for memory "
+                    "pressure follows this without a signal or an exit marker",
+                    (double)os_proc_available_memory() / 1048576.0);
+    }];
+    atexit(ms_log_atexit_marker);
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *guest = [bundle stringByAppendingPathComponent:@"Frameworks/StudioKit"];
     NSString *plugins = [bundle stringByAppendingPathComponent:@"Frameworks/PlugIns"];

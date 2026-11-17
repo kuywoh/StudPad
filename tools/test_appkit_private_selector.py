@@ -23,6 +23,21 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
             ),
         )
 
+    def test_nsapplication_stores_effective_appearance_for_qt_kvo(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("@implementation NSApplication")
+        end = source.index("\\n@end", start)
+        implementation = source[start:end]
+
+        self.assertIn("id _msEffectiveAppearance;", source)
+        self.assertIn("- (void)setEffectiveAppearance:(id)appearance {", implementation)
+        self.assertIn("if (_msEffectiveAppearance == appearance) return;", implementation)
+        self.assertIn("_msEffectiveAppearance = appearance;", implementation)
+        self.assertIn('- (id)effectiveAppearance {', implementation)
+        self.assertIn('NSClassFromString(@"NSAppearance")', implementation)
+
     def test_nsapplication_menu_alias_is_implemented_for_qt_and_kvo(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
             encoding="utf-8"

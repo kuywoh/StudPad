@@ -1144,6 +1144,19 @@ static UIWindowScene *ms_active_scene(void) {
 - (double)backingScaleFactor { return (double)UIScreen.mainScreen.scale; }
 - (void)setDelegate:(id)delegate { _msDelegate = delegate; }
 - (id)delegate { return _msDelegate; }
+
+// Qt's Cocoa theme observes this AppKit property. Keep its value on the shim object rather than
+// sending repeated unsupported setter calls through MSStubObject's generic forwarding path.
+- (void)setEffectiveAppearance:(id)appearance {
+    if (_msEffectiveAppearance == appearance) return;
+    _msEffectiveAppearance = appearance;
+}
+- (id)effectiveAppearance {
+    if (_msEffectiveAppearance) return _msEffectiveAppearance;
+    Class appearanceClass = NSClassFromString(@"NSAppearance");
+    _msEffectiveAppearance = appearanceClass ? [[appearanceClass alloc] init] : nil;
+    return _msEffectiveAppearance;
+}
 - (void)makeFirstResponder:(id)responder { [responder becomeFirstResponder]; }
 - (id)firstResponder { return nil; }
 - (void)invalidateShadow { }
@@ -1190,6 +1203,7 @@ static UIWindowScene *ms_active_scene(void) {
 @interface NSApplication : MSStubObject {
     id _msDelegate;
     id _msMainMenu;
+    id _msEffectiveAppearance;
     BOOL _msShouldTerminate;
     BOOL _msActive;
     BOOL _msFinishedLaunching;

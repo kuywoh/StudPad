@@ -368,7 +368,12 @@ static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
 - (id)colorSpace { return nil; }
 - (NSInteger)numberOfComponents { return 4; }
 - (id)colorUsingColorSpace:(id)space { (void)space; return self; }
-- (id)colorUsingColorSpaceName:(id)name { (void)name; return self; }
+- (id)colorUsingColorSpaceName:(id)name {
+    NSString *spaceName = [name isKindOfClass:NSString.class] ? name : nil;
+    // Qt 5 treats every non-nil NSPatternColorSpace conversion as an image pattern.
+    if ([spaceName isEqualToString:(__bridge NSString *)NSPatternColorSpace]) return nil;
+    return self;
+}
 - (id)highlightWithLevel:(CGFloat)level { (void)level; return self; }
 - (id)colorWithAlphaComponent:(CGFloat)alpha {
     return [[MSColor alloc] initWithColor:[_color colorWithAlphaComponent:alpha]];

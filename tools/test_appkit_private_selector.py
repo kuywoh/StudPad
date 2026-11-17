@@ -76,6 +76,14 @@ class MSColorCompatibilityTests(unittest.TestCase):
         implementation = source[start:end]
 
         self.assertIn("- (NSInteger)type { return 0; }", implementation)
+        self.assertIn(
+            "NSString *spaceName = [name isKindOfClass:NSString.class] ? name : nil;",
+            implementation,
+        )
+        self.assertIn(
+            "if ([spaceName isEqualToString:(__bridge NSString *)NSPatternColorSpace]) return nil;",
+            implementation,
+        )
         self.assertIn("- (id)patternImage { return nil; }", implementation)
 
 

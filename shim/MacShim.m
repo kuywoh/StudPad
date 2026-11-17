@@ -1280,6 +1280,9 @@ NSApplication *NSApp = nil;
 - (BOOL)isRunning { return YES; }
 - (void)setActivationPolicy:(long)policy { (void)policy; }
 - (long)activationPolicy { return 0; }
+// NSApplication inherits NSResponder's menu property; for NSApplication it aliases mainMenu.
+- (void)setMenu:(id)menu { _msMainMenu = menu; }
+- (id)menu { return _msMainMenu; }
 - (void)setMainMenu:(id)menu { _msMainMenu = menu; }
 - (id)mainMenu { return _msMainMenu; }
 - (void)setServicesMenu:(id)menu { (void)menu; }

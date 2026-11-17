@@ -23,6 +23,19 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
             ),
         )
 
+    def test_nsapplication_menu_alias_is_implemented_for_qt_and_kvo(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("@implementation NSApplication")
+        end = source.index("@end", start)
+        implementation = source[start:end]
+
+        self.assertIn("- (void)setMenu:(id)menu { _msMainMenu = menu; }", implementation)
+        self.assertIn("- (id)menu { return _msMainMenu; }", implementation)
+        self.assertIn("- (void)setMainMenu:(id)menu { _msMainMenu = menu; }", implementation)
+        self.assertIn("- (id)mainMenu { return _msMainMenu; }", implementation)
+
     def test_nsapplication_reports_no_active_modal_window_at_launch(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
             encoding="utf-8"

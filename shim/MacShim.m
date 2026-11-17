@@ -26,6 +26,7 @@
 #import <GameController/GameController.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <CoreFoundation/CFBundle.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
@@ -2431,13 +2432,15 @@ static const ms_interposer_t ms_exit_interposers[] = {
     {(const void *)ms_exit, (const void *)exit},
 };
 
-// Studio finds its installation from the executable directory. Build 98's log proved it: the strings
-// beside Studio's "Some Studio files are missing or corrupted" alert resolve AppSettings.xml as
-// QCoreApplication::applicationDirPath() + "/../Resources/AppSettings.xml", and Qt takes that
-// directory from this call. The host really lives in App.app/StudPadStudio, so Studio looked in
-// App.app/../Resources, found nothing, and refused to open. Answering with the guest path puts it
-// back inside the RobloxStudio.app it was given: <bundle>/Contents/MacOS/../Resources is the
-// resource bundle the iPad downloads, which is exactly where Studio expects its installation.
+// Studio's install check, in StudioKit's startup code, reads the BaseUrl from AppSettings.xml and
+// shows "Some Studio files are missing or corrupted" when it is empty. It finds that file as
+// QCoreApplication::applicationDirPath() + "/../Resources/AppSettings.xml", and Qt answers that from
+// CFBundleCopyExecutableURL(CFBundleGetMainBundle()) — measured, not assumed: QtCore imports those
+// two calls, has no NSBundle selector strings and never calls _NSGetExecutablePath (build 99 logged
+// no call). Main bundle was App.app/StudPadStudio, so Studio read App.app/../Resources and found
+// nothing. The interposer below answers for the guest path instead.
+// _NSGetExecutablePath is still interposed: nothing in build 99 asked, but a guest that does should
+// hear where it was launched from rather than the host it is loaded into.
 static int (*gRealGetExecutablePath)(char *, uint32_t *);
 static int gExecutablePathCalls;
 
@@ -2464,9 +2467,45 @@ static int ms_get_executable_path(char *buffer, uint32_t *size) {
     return status;
 }
 
+static void *ms_core_foundation_symbol(const char *name) {
+    void *symbol = dlsym(RTLD_NEXT, name);
+    if (symbol) return symbol;
+    static void *handle;
+    if (!handle)
+        handle = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+                        RTLD_LAZY | RTLD_NOLOAD);
+    return handle ? dlsym(handle, name) : NULL;
+}
+
+typedef CFURLRef (*ms_copy_executable_url_fn)(CFBundleRef);
+typedef CFBundleRef (*ms_get_main_bundle_fn)(void);
+
+static CFURLRef ms_copy_executable_url(CFBundleRef bundle) {
+    static ms_copy_executable_url_fn real;
+    static ms_get_main_bundle_fn main_bundle;
+    static int answers;
+    if (!real)
+        real = (ms_copy_executable_url_fn)ms_core_foundation_symbol("CFBundleCopyExecutableURL");
+    if (!main_bundle)
+        main_bundle = (ms_get_main_bundle_fn)ms_core_foundation_symbol("CFBundleGetMainBundle");
+    if (gStudioLaunchPath && main_bundle && bundle && bundle == main_bundle()) {
+        CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+            kCFAllocatorDefault, (const UInt8 *)gStudioLaunchPath,
+            (CFIndex)strlen(gStudioLaunchPath), false);
+        if (url) {
+            if (answers++ < 3)
+                studpad_log("[shim] application path %s (Studio's Resources come from here)",
+                            gStudioLaunchPath);
+            return url;
+        }
+    }
+    return real ? real(bundle) : NULL;
+}
+
 __attribute__((used, section("__DATA,__interpose")))
 static const ms_interposer_t ms_executable_path_interposers[] = {
     {(const void *)ms_get_executable_path, (const void *)_NSGetExecutablePath},
+    {(const void *)ms_copy_executable_url, (const void *)CFBundleCopyExecutableURL},
 };
 
 static void ms_log_guest_home(void) {

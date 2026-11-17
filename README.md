@@ -83,7 +83,7 @@ guest home: /var/mobile/Containers/Data/…/    # Studio's ~; the line below say
 dlopen returned 0x…; images 3 -> 14            # dyld accepted Studio and the Qt dylibs
 screen: UIScreen bounds 1024x1366 pt …         # 320x480 here means iPhone compatibility mode
 screen: NSScreen frame 1024x1366 pt …          # what Qt's cocoa plugin uses for its screen
-[shim] executable path /…/RobloxStudio.app/Contents/MacOS/RobloxStudio  # Studio's install base
+[shim] application path /…/RobloxStudio.app/Contents/MacOS/RobloxStudio  # Studio's install base
 calling Studio main
 [shim] NSColor extended: … palette method(s)  # AppKit's colour palette, answered over UIKit
 [shim] NSWindow(UIWindow) … scene=0x…         # Qt created a window
@@ -109,13 +109,18 @@ Studio needs the iPad's own canvas. `UIDeviceFamily` in `Info.plist` lists iPads
 refuses a build without it: an iPhone-only app runs letterboxed in a 320x480 canvas, which is
 exactly the `QRect(0,0 320x480)` build 97's Qt reported.
 
-Studio also has to be told where it is installed. It resolves its installation as
-`QCoreApplication::applicationDirPath() + "/../Resources/AppSettings.xml"`, and Qt takes that
-directory from `_NSGetExecutablePath`, which still named the host (`App.app/StudPadStudio`). Studio
-therefore looked for `App.app/../Resources/AppSettings.xml`, found nothing, and showed "Some Studio
-files are missing or corrupted" before it created a window — build 98's log recorded that dialog.
-The shim answers `_NSGetExecutablePath` with the guest path it was launched with, so the lookup
-lands in `RobloxStudio.app/Contents/Resources`, the bundle the iPad downloads.
+Studio also has to be told where it is installed. Its startup code reads the `BaseUrl` from
+`AppSettings.xml` and shows "Some Studio files are missing or corrupted" when that value is empty —
+builds 98 and 99 logged exactly that dialog before any window appeared. Studio looks for the file at
+`QCoreApplication::applicationDirPath() + "/../Resources/AppSettings.xml"`, and Qt answers that
+directory from `CFBundleCopyExecutableURL(CFBundleGetMainBundle())`: QtCore imports that pair, has
+no `NSBundle` selector strings, and never calls `_NSGetExecutablePath` (build 99 logged no such
+call). The main bundle was `App.app/StudPadStudio`, so Studio read `App.app/../Resources`, found no
+`AppSettings.xml`, and reported an empty `BaseUrl`. The shim answers
+`CFBundleCopyExecutableURL` for the main bundle with the guest path it was launched with, so the
+directory becomes `RobloxStudio.app/Contents/MacOS` and the file resolves to the downloaded
+`Contents/Resources/AppSettings.xml`, which carries `BaseUrl` and `ContentFolder`. Other bundles
+keep their real executable URL.
 
 The setup screen reports memory entitlement and debugger state. Touch, keyboard and rendering still
 need device verification. The shim can host a layer supplied by Qt or Studio, but that does not

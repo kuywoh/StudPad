@@ -307,6 +307,20 @@ class StudioInstallLocationTests(unittest.TestCase):
         self.assertIn("{(const void *)ms_get_executable_path, (const void *)_NSGetExecutablePath},",
                       self.source)
 
+    def test_main_bundle_executable_url_answers_with_the_guest_bundle(self):
+        start = self.source.index("static CFURLRef ms_copy_executable_url")
+        end = self.source.index("ms_executable_path_interposers", start)
+        body = self.source[start:end]
+
+        # Qt's applicationDirPath is CFBundleCopyExecutableURL(CFBundleGetMainBundle()).
+        self.assertIn("bundle == main_bundle()", body)
+        self.assertIn("CFURLCreateFromFileSystemRepresentation", body)
+        self.assertIn("gStudioLaunchPath", body)
+        # Other bundles (frameworks, plugins) must keep their real executable.
+        self.assertIn("return real ? real(bundle) : NULL;", body)
+        self.assertIn("{(const void *)ms_copy_executable_url, (const void *)CFBundleCopyExecutableURL},",
+                      self.source)
+
 
 class QtPlatformThemeStartupTests(unittest.TestCase):
     def test_cocoa_window_backend_uses_generic_theme(self):

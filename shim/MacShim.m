@@ -761,8 +761,8 @@ static void ms_pump(double seconds) {
 static void ms_log_runtime_class_identity(const char *name) {
     Class cls = objc_lookUpClass(name);
     Class metaclass = cls ? object_getClass(cls) : Nil;
-    studpad_log("[objc class] %s class=%p metaclass=%p", name, (void *)cls,
-                (void *)metaclass);
+    studpad_log("[objc class] %s class=%p metaclass=%p", name, (__bridge void *)cls,
+                (__bridge void *)metaclass);
 }
 
 @interface NSScreen : MSStubObject
@@ -777,7 +777,7 @@ static void ms_log_runtime_class_identity(const char *name) {
     static dispatch_once_t classDiagnosticsOnce;
     dispatch_once(&classDiagnosticsOnce, ^{
         studpad_log("[objc class] NSScreen object=%p class=%p", screen,
-                    (void *)object_getClass(screen));
+                    (__bridge void *)object_getClass(screen));
         const char *classNames[] = {
             "MSStubObject", "MSColor", "NSApplication", "NSColor", "NSEvent",
             "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow",

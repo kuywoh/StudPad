@@ -48,22 +48,16 @@ class AppKitMenuItemCompatibilityTests(unittest.TestCase):
         implementation = source[start:end]
 
         self.assertIn("BOOL _msSeparatorItem;", source)
-        self.assertRegex(
+        self.assertIn("+ (instancetype)separatorItem {", implementation)
+        self.assertIn(
+            'NSMenuItem *item = [[self alloc] initWithTitle:@"" action:NULL keyEquivalent:@""];',
             implementation,
-            re.compile(
-                r"\\+\\s*\\(instancetype\\)\\s*separatorItem\\s*\\{"
-                r"[\\s\\S]*?NSMenuItem \\*item = \\[@\\[self alloc\\] "
-                r"initWithTitle:@\\"\\" action:NULL keyEquivalent:@\\"\\"\\];"
-                r"[\\s\\S]*?item->\\_msSeparatorItem = YES;"
-                r"[\\s\\S]*?return item;"
-            ),
         )
-        self.assertRegex(
-            implementation,
-            re.compile(r"-\\s*\\(BOOL\\)\\s*isSeparatorItem\\s*"
-                       r"\\{\\s*return _msSeparatorItem;\\s*\\}"),
+        self.assertIn("item->_msSeparatorItem = YES;", implementation)
+        self.assertIn("return item;", implementation)
+        self.assertIn(
+            "- (BOOL)isSeparatorItem { return _msSeparatorItem; }", implementation
         )
-
 
 class StubReturnContractTests(unittest.TestCase):
     def test_unknown_selectors_zero_the_aarch64_return_registers(self):

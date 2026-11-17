@@ -365,6 +365,7 @@ static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
 - (NSString *)className { return @"NSColor"; }
 - (NSString *)catalogNameComponent { return @"Shim"; }
 - (NSString *)colorNameComponent { return @"shim"; }
+- (NSString *)colorSpaceName { return (__bridge NSString *)NSDeviceRGBColorSpace; }
 - (id)colorSpace { return nil; }
 - (NSInteger)numberOfComponents { return 4; }
 - (id)colorUsingColorSpace:(id)space { (void)space; return self; }

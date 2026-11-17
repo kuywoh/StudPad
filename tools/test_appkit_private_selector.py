@@ -51,6 +51,22 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
         )
 
 
+class CocoaDisplayCompatibilityTests(unittest.TestCase):
+    def test_uikit_bounds_and_nsscreen_id_match_coregraphics_display(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '- (id)deviceDescription { return @{@"NSScreenNumber": @(CGMainDisplayID())}; }',
+            source,
+        )
+        start = source.index("void studpad_guest_start(void)")
+        setup = source[start : start + 700]
+        self.assertIn("studpad_set_main_screen_bounds(mainScreen.bounds);", setup)
+        self.assertIn("UIScreen *mainScreen = UIScreen.mainScreen;", setup)
+
+
 class AppKitMenuItemCompatibilityTests(unittest.TestCase):
     def test_separator_factory_returns_a_real_separator_item(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

@@ -19,6 +19,7 @@
 #import "MacShim.h"
 #import "GuestHome.h"
 #import "InputBridge.h"
+#import "LegacyCompatibility.h"
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -754,7 +755,7 @@ static void ms_pump(double seconds) {
 - (CGRect)frame { return UIScreen.mainScreen.bounds; }
 - (CGRect)visibleFrame { return UIScreen.mainScreen.bounds; }
 - (double)backingScaleFactor { return UIScreen.mainScreen.scale; }
-- (id)deviceDescription { return @{}; }
+- (id)deviceDescription { return @{@"NSScreenNumber": @(CGMainDisplayID())}; }
 - (long)depth { return 24; }
 - (CGRect)convertRectToBacking:(CGRect)rect { return rect; }
 @end
@@ -2116,6 +2117,10 @@ int studpad_increased_memory_enabled(void) {
 
 void studpad_guest_start(void) {
     if (gStarted++) return;
+    UIScreen *mainScreen = UIScreen.mainScreen;
+    studpad_set_main_screen_bounds(mainScreen.bounds);
+    studpad_log("[shim] CoreGraphics display %u: %.0f x %.0f points",
+                CGMainDisplayID(), mainScreen.bounds.size.width, mainScreen.bounds.size.height);
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *guest = [bundle stringByAppendingPathComponent:@"Frameworks/StudioKit"];
     NSString *plugins = [bundle stringByAppendingPathComponent:@"Frameworks/PlugIns"];

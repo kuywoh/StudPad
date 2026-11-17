@@ -45,13 +45,39 @@ int main(void) {
     assert(PMPaperGetHeight(NULL) == 0.0);
     assert(PMPaperGetWidth(NULL) == 0.0);
 
+    CGRect screenBounds = CGRectMake(10.0, 20.0, 800.0, 600.0);
+    studpad_set_main_screen_bounds(screenBounds);
+    assert(CGMainDisplayID() == 1);
+    assert(CGRectEqualToRect(CGDisplayBounds(CGMainDisplayID()), screenBounds));
+    assert(CGRectEqualToRect(CGDisplayBounds(0), CGRectZero));
+    assert(CGDisplayIsMain(1));
+    assert(CGDisplayIsOnline(1));
+    assert(!CGDisplayIsOnline(0));
+    assert(CGDisplayMirrorsDisplay(1) == 0);
+
     uint32_t displays[4] = {42, 42, 42, 42};
     uint32_t count = 42;
-    assert(CGGetDisplaysWithRect(CGRectZero, 4, displays, &count) == kCGErrorFailure);
+    assert(CGGetOnlineDisplayList(0, NULL, &count) == kCGErrorSuccess);
+    assert(count == 1);
+    assert(CGGetOnlineDisplayList(4, displays, &count) == kCGErrorSuccess);
+    assert(count == 1 && displays[0] == 1);
+
+    count = 42;
+    assert(CGGetDisplaysWithRect(CGRectZero, 4, displays, &count) == kCGErrorSuccess);
     assert(count == 0);
     count = 42;
-    assert(CGGetOnlineDisplayList(4, displays, &count) == kCGErrorFailure);
+    assert(CGGetDisplaysWithRect(CGRectMake(20.0, 30.0, 10.0, 10.0), 4,
+                                 displays, &count) == kCGErrorSuccess);
+    assert(count == 1 && displays[0] == 1);
+    count = 42;
+    assert(CGGetDisplaysWithRect(CGRectMake(900.0, 900.0, 10.0, 10.0), 4,
+                                 displays, &count) == kCGErrorSuccess);
     assert(count == 0);
+
+    CFUUIDRef displayUUID = CGDisplayCreateUUIDFromDisplayID(1);
+    assert(displayUUID != NULL);
+    CFRelease(displayUUID);
+    assert(CGDisplayCreateUUIDFromDisplayID(0) == NULL);
 
     void *displayLink = (void *)1;
     assert(CVDisplayLinkCreateWithCGDisplay(0, &displayLink) != 0);

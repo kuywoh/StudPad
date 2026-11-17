@@ -7,6 +7,7 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <mach/mach.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +41,15 @@ extern const mach_port_t kIOMasterPortDefault;
 extern const CFStringRef kDADiskDescriptionDeviceModelKey;
 extern const CFStringRef kSecImportExportKeychain;
 extern const CFStringRef kUTTagClassOSType;
+
+// One UIKit screen is exposed as a stable AppKit/CoreGraphics display. Qt asks for the
+// display list before it can create its Cocoa screen objects.
+void studpad_set_main_screen_bounds(CGRect bounds);
+uint32_t CGMainDisplayID(void);
+bool CGDisplayIsMain(uint32_t display);
+bool CGDisplayIsOnline(uint32_t display);
+uint32_t CGDisplayMirrorsDisplay(uint32_t display);
+CFUUIDRef CGDisplayCreateUUIDFromDisplayID(uint32_t display);
 
 // Typed display/CV shims. The generated stub returns a pointer in x0, which is not a valid
 // CGRect/CGSize/CGPoint return, and leaves output pointers untouched even when it reports success.

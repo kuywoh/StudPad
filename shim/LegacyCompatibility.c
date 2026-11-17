@@ -1,6 +1,7 @@
 #include "LegacyCompatibility.h"
 
 #include <stddef.h>
+#include <stdbool.h>
 
 // The values below are identifiers, not measurements: the guest compares them, uses them as
 // dictionary keys, or passes them back to a framework. Each only has to be unique and non-NULL.
@@ -32,9 +33,21 @@ const CFStringRef kDADiskDescriptionDeviceModelKey = CFSTR("DADiskDescriptionDev
 const CFStringRef kSecImportExportKeychain = CFSTR("kSecImportExportKeychain");
 const CFStringRef kUTTagClassOSType = CFSTR("com.apple.ostype");
 
+// The Cocoa plugin requires a coherent display ID across CoreGraphics and NSScreen. iOS
+// exposes the physical screen through UIKit, so the host supplies its bounds before Qt starts.
+static const uint32_t STUDPAD_MAIN_DISPLAY_ID = 1;
+static CGRect gMainDisplayBounds = CGRectZero;
+
+void studpad_set_main_screen_bounds(CGRect bounds) {
+    gMainDisplayBounds = CGRectIsEmpty(bounds) ? CGRectZero : CGRectStandardize(bounds);
+}
+
+uint32_t CGMainDisplayID(void) {
+    return STUDPAD_MAIN_DISPLAY_ID;
+}
+
 CGRect CGDisplayBounds(uint32_t display) {
-    (void)display;
-    return CGRectZero;
+    return display == STUDPAD_MAIN_DISPLAY_ID ? gMainDisplayBounds : CGRectZero;
 }
 
 CGSize CGDisplayScreenSize(uint32_t display) {
@@ -53,20 +66,40 @@ CGPoint CGEventGetLocation(void *event) {
     return CGPointZero;
 }
 
+bool CGDisplayIsMain(uint32_t display) {
+    return display == STUDPAD_MAIN_DISPLAY_ID;
+}
+
+bool CGDisplayIsOnline(uint32_t display) {
+    return display == STUDPAD_MAIN_DISPLAY_ID;
+}
+
+uint32_t CGDisplayMirrorsDisplay(uint32_t display) {
+    (void)display;
+    return 0;
+}
+
+CFUUIDRef CGDisplayCreateUUIDFromDisplayID(uint32_t display) {
+    if (display != STUDPAD_MAIN_DISPLAY_ID) return NULL;
+    return CFUUIDCreateFromString(
+        kCFAllocatorDefault, CFSTR("9ACDD54D-6B13-4F9A-A5BD-4BB19C4E8119"));
+}
+
 CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays, uint32_t *displays,
                               uint32_t *count) {
-    (void)rect;
-    (void)maxDisplays;
-    (void)displays;
-    if (count) *count = 0;
-    return kCGErrorFailure;
+    if (!count) return kCGErrorFailure;
+    *count = 0;
+    if (!CGRectIntersectsRect(rect, gMainDisplayBounds)) return kCGErrorSuccess;
+    *count = 1;
+    if (maxDisplays > 0 && displays) displays[0] = STUDPAD_MAIN_DISPLAY_ID;
+    return kCGErrorSuccess;
 }
 
 CGError CGGetOnlineDisplayList(uint32_t maxDisplays, uint32_t *displays, uint32_t *count) {
-    (void)maxDisplays;
-    (void)displays;
-    if (count) *count = 0;
-    return kCGErrorFailure;
+    if (!count) return kCGErrorFailure;
+    *count = 1;
+    if (maxDisplays > 0 && displays) displays[0] = STUDPAD_MAIN_DISPLAY_ID;
+    return kCGErrorSuccess;
 }
 
 // CoreVideo's display link cannot be provided here. Return an error and clear the out parameter so

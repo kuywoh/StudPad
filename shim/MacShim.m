@@ -373,6 +373,9 @@ static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
 - (id)colorWithAlphaComponent:(CGFloat)alpha {
     return [[MSColor alloc] initWithColor:[_color colorWithAlphaComponent:alpha]];
 }
+// The shim's MSColor instances wrap solid UIKit colors, never AppKit image patterns.
+- (id)patternImage { return nil; }
+
 - (CGColorRef)CGColor { return _color.CGColor; }
 
 - (BOOL)getRed:(CGFloat *)red green:(CGFloat *)green blue:(CGFloat *)blue alpha:(CGFloat *)alpha {

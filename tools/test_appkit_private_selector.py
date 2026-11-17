@@ -66,6 +66,18 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
         )
 
 
+class MSColorCompatibilityTests(unittest.TestCase):
+    def test_solid_mscolor_has_no_pattern_image(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("@implementation MSColor")
+        end = source.index("\\n@end", start)
+        implementation = source[start:end]
+
+        self.assertIn("- (id)patternImage { return nil; }", implementation)
+
+
 class CocoaDisplayCompatibilityTests(unittest.TestCase):
     def test_uikit_bounds_and_nsscreen_id_match_coregraphics_display(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

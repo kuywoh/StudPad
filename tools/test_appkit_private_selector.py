@@ -38,6 +38,33 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
         )
 
 
+class AppKitMenuItemCompatibilityTests(unittest.TestCase):
+    def test_separator_factory_returns_a_real_separator_item(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("@implementation NSMenuItem")
+        end = source.index("\\n@end", start)
+        implementation = source[start:end]
+
+        self.assertIn("BOOL _msSeparatorItem;", source)
+        self.assertRegex(
+            implementation,
+            re.compile(
+                r"\\+\\s*\\(instancetype\\)\\s*separatorItem\\s*\\{"
+                r"[\\s\\S]*?NSMenuItem \\*item = \\[@\\[self alloc\\] "
+                r"initWithTitle:@\\"\\" action:NULL keyEquivalent:@\\"\\"\\];"
+                r"[\\s\\S]*?item->\\_msSeparatorItem = YES;"
+                r"[\\s\\S]*?return item;"
+            ),
+        )
+        self.assertRegex(
+            implementation,
+            re.compile(r"-\\s*\\(BOOL\\)\\s*isSeparatorItem\\s*"
+                       r"\\{\\s*return _msSeparatorItem;\\s*\\}"),
+        )
+
+
 class StubReturnContractTests(unittest.TestCase):
     def test_unknown_selectors_zero_the_aarch64_return_registers(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

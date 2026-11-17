@@ -1468,10 +1468,21 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
     id _msTarget;
     id _msSubmenu;
     SEL _msAction;
+    BOOL _msSeparatorItem;
 }
 @end
 
 @implementation NSMenuItem
++ (instancetype)separatorItem {
+    // AppKit's factory must return a real item; the generic missing-selector fallback returns nil.
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        studpad_log("[shim] NSMenuItem separator factory active");
+    });
+    NSMenuItem *item = [[self alloc] initWithTitle:@"" action:NULL keyEquivalent:@""];
+    item->_msSeparatorItem = YES;
+    return item;
+}
 - (id)initWithTitle:(id)title action:(SEL)action keyEquivalent:(id)key {
     if ((self = [super init])) {
         _msTitle = [title copy];
@@ -1482,6 +1493,7 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
 }
 - (id)title { return _msTitle; }
 - (void)setTitle:(id)title { _msTitle = [title copy]; }
+- (BOOL)isSeparatorItem { return _msSeparatorItem; }
 - (SEL)action { return _msAction; }
 - (void)setAction:(SEL)action { _msAction = action; }
 - (id)keyEquivalent { return _msKey ? _msKey : @""; }

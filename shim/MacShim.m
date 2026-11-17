@@ -277,12 +277,14 @@ static void ms_install_foundation_file_readers(void) {
 }
 
 static void ms_install_appkit_colors(void);
+static void ms_install_appkit_alerts(void);
 
 @implementation MSStubObject
 
 + (void)load {
     ms_install_foundation_file_readers();
     ms_install_appkit_colors();
+    ms_install_appkit_alerts();
 }
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
@@ -331,6 +333,29 @@ static void ms_install_appkit_colors(void);
 }
 
 @end
+
+// Qt's Cocoa message dialog sends this AppKit setter; iOS may expose NSAlert without it.
+// Install a correctly typed no-op so repeated dialog setup does not fall into generic forwarding.
+static void ms_nsalert_set_style(id self, SEL _cmd, NSInteger style) {
+    (void)self;
+    (void)_cmd;
+    (void)style;
+}
+
+static void ms_install_appkit_alerts(void) {
+    Class cls = objc_lookUpClass("NSAlert");
+    if (!cls) {
+        cls = objc_allocateClassPair([MSStubObject class], "NSAlert", 0);
+        if (cls) objc_registerClassPair(cls);
+    }
+    if (!cls) {
+        studpad_log("[shim] could not install NSAlert style compatibility");
+        return;
+    }
+    class_replaceMethod(cls, sel_registerName("setAlertStyle:"),
+                        (IMP)ms_nsalert_set_style, "v@:q");
+    studpad_log("[shim] NSAlert setAlertStyle: compatibility active");
+}
 
 // ---------------------------------------------------------------------------------------------
 // NSColor: AppKit's palette over UIKit

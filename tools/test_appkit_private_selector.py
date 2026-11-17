@@ -121,6 +121,25 @@ class CocoaDisplayCompatibilityTests(unittest.TestCase):
         self.assertIn("UIScreen *mainScreen = UIScreen.mainScreen;", setup)
 
 
+class AppKitAlertCompatibilityTests(unittest.TestCase):
+    def test_nsalert_style_setter_uses_a_typed_runtime_implementation(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "static void ms_nsalert_set_style(id self, SEL _cmd, NSInteger style)",
+            source,
+        )
+        self.assertIn(
+            'class_replaceMethod(cls, sel_registerName("setAlertStyle:"),',
+            source,
+        )
+        self.assertIn('(IMP)ms_nsalert_set_style, "v@:q");', source)
+        start = source.index("@implementation MSStubObject")
+        end = source.index("\n@end", start)
+        self.assertIn("ms_install_appkit_alerts();", source[start:end])
+
+
 class AppKitMenuItemCompatibilityTests(unittest.TestCase):
     def test_separator_factory_returns_a_real_separator_item(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

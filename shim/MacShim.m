@@ -2431,6 +2431,44 @@ static const ms_interposer_t ms_exit_interposers[] = {
     {(const void *)ms_exit, (const void *)exit},
 };
 
+// Studio finds its installation from the executable directory. Build 98's log proved it: the strings
+// beside Studio's "Some Studio files are missing or corrupted" alert resolve AppSettings.xml as
+// QCoreApplication::applicationDirPath() + "/../Resources/AppSettings.xml", and Qt takes that
+// directory from this call. The host really lives in App.app/StudPadStudio, so Studio looked in
+// App.app/../Resources, found nothing, and refused to open. Answering with the guest path puts it
+// back inside the RobloxStudio.app it was given: <bundle>/Contents/MacOS/../Resources is the
+// resource bundle the iPad downloads, which is exactly where Studio expects its installation.
+static int (*gRealGetExecutablePath)(char *, uint32_t *);
+static int gExecutablePathCalls;
+
+static int ms_get_executable_path(char *buffer, uint32_t *size) {
+    const char *path = gStudioLaunchPath;
+    if (!path || !size) {
+        if (!gRealGetExecutablePath)
+            gRealGetExecutablePath =
+                (int (*)(char *, uint32_t *))ms_passwd_symbol("_NSGetExecutablePath");
+        return gRealGetExecutablePath ? gRealGetExecutablePath(buffer, size) : -1;
+    }
+    uint32_t needed = (uint32_t)(strlen(path) + 1);
+    int status = 0;
+    if (!buffer || *size < needed) {
+        status = -1;
+    } else {
+        memcpy(buffer, path, needed);
+    }
+    *size = needed;
+    if (gExecutablePathCalls < 3) {
+        gExecutablePathCalls++;
+        studpad_log("[shim] executable path %s", path);
+    }
+    return status;
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const ms_interposer_t ms_executable_path_interposers[] = {
+    {(const void *)ms_get_executable_path, (const void *)_NSGetExecutablePath},
+};
+
 static void ms_log_guest_home(void) {
     ms_resolve_passwd();
     const char *home = ms_guest_home();
@@ -2603,6 +2641,10 @@ void studpad_guest_start(void) {
     studpad_log("guest: %s", guest.UTF8String);
     studpad_log("Studio argv[0]: %s", launchArgument.UTF8String);
     studpad_log("Studio Resources: %s", resourceDirectory.UTF8String);
+    NSString *contentDirectory = [resourceDirectory stringByAppendingPathComponent:@"content"];
+    studpad_log("Studio content: %s",
+                [[NSFileManager defaultManager] fileExistsAtPath:contentDirectory]
+                    ? contentDirectory.UTF8String : "missing (the package's content folder)");
 
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)
                          .firstObject;

@@ -286,6 +286,28 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.assertIn("popoverPresentationController.sourceRect", self.source)
 
 
+class StudioInstallLocationTests(unittest.TestCase):
+    """Studio refused to start until its install lookup could see the guest's own bundle."""
+
+    def setUp(self):
+        self.source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+
+    def test_executable_path_answers_with_the_guest_bundle(self):
+        start = self.source.index("static int ms_get_executable_path")
+        end = self.source.index("ms_executable_path_interposers", start)
+        body = self.source[start:end]
+
+        self.assertIn("const char *path = gStudioLaunchPath;", body)
+        self.assertIn("memcpy(buffer, path, needed);", body)
+        self.assertIn("*size = needed;", body)
+
+    def test_executable_path_interposer_is_installed(self):
+        self.assertIn("{(const void *)ms_get_executable_path, (const void *)_NSGetExecutablePath},",
+                      self.source)
+
+
 class QtPlatformThemeStartupTests(unittest.TestCase):
     def test_cocoa_window_backend_uses_generic_theme(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

@@ -162,12 +162,14 @@ def main():
     # The shim interposes those calls to report the app container, so the tuples must be in the
     # shipped dylib: dyld only reads __interpose from launch images, and the host links the shim.
     # exit() is interposed as well: it is the only marker that says Studio quit instead of crashing.
+    # _NSGetExecutablePath answers with the guest path so Studio's install lookup lands in the
+    # RobloxStudio.app it was given instead of in App.app/../Resources.
     shim_interposers = active_interpose_tuple_count(z.read(SHIM))
-    if shim_interposers < 5:
+    if shim_interposers < 6:
         fail(
             f"shim has {shim_interposers} active __interpose tuple(s); the passwd home "
-            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r, and the exit "
-            "marker needs exit "
+            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r, the exit marker "
+            "needs exit, and Studio's installation lookup needs _NSGetExecutablePath"
         )
 
     host_data = z.read(HOST)

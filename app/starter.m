@@ -227,6 +227,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    studpad_log("Setup view loading");
     self.view.backgroundColor = [UIColor colorWithRed:0.055 green:0.07 blue:0.1 alpha:1];
 
     NSString *manifestPath = [[NSBundle mainBundle] pathForResource:@"StudioPackage" ofType:@"plist"];
@@ -410,6 +411,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
                                                object:nil];
     [self refreshSetupStatus];
     [self updateCrashBanner];
+    studpad_log("Setup view loaded");
 }
 
 - (UIButton *)buttonWithTitle:(NSString *)title selector:(SEL)selector primary:(BOOL)primary {
@@ -805,6 +807,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     (void)session;
     (void)connectionOptions;
     UIWindowScene *windowScene = (UIWindowScene *)scene;
+    studpad_log("Scene connected: %s", NSStringFromClass(windowScene.class).UTF8String ?: "UIWindowScene");
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
     self.window.rootViewController = [StudPadViewController new];
     [self.window makeKeyAndVisible];
@@ -831,6 +834,7 @@ int main(int argc, char **argv) {
         // Resolve and create the log directory before the guest runs, so the crash handler never has
         // to enter Foundation for the first time inside a signal.
         (void)studpad_log_path_c();
+        studpad_log("StudPad main entered (pid %d)", getpid());
         NSSetUncaughtExceptionHandler(uncaught_exception);
         struct sigaction action;
         memset(&action, 0, sizeof action);

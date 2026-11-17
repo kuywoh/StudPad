@@ -96,7 +96,7 @@ class MSColorCompatibilityTests(unittest.TestCase):
             encoding="utf-8"
         )
         start = source.index("static void ms_install_appkit_colors(void)")
-        end = source.index("\\nstatic void ms_pump", start)
+        end = source.index("static void ms_pump", start)
         install = source[start:end]
 
         self.assertIn("int wrapped = 0;", install)

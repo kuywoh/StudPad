@@ -758,6 +758,13 @@ static void ms_pump(double seconds) {
 - (id)trackingArea { return nil; }
 @end
 
+static void ms_log_runtime_class_identity(const char *name) {
+    Class cls = objc_lookUpClass(name);
+    Class metaclass = cls ? object_getClass(cls) : Nil;
+    studpad_log("[objc class] %s class=%p metaclass=%p", name, (void *)cls,
+                (void *)metaclass);
+}
+
 @interface NSScreen : MSStubObject
 @end
 
@@ -765,6 +772,20 @@ static void ms_pump(double seconds) {
 + (NSScreen *)mainScreen {
     static NSScreen *screen = nil;
     if (!screen) screen = [NSScreen new];
+
+    // objc_fatal exits without reaching the app's signal handler; map nearby class pointers first.
+    static dispatch_once_t classDiagnosticsOnce;
+    dispatch_once(&classDiagnosticsOnce, ^{
+        studpad_log("[objc class] NSScreen object=%p class=%p", screen,
+                    (void *)object_getClass(screen));
+        const char *classNames[] = {
+            "MSStubObject", "MSColor", "NSApplication", "NSColor", "NSEvent",
+            "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow",
+            "QNSView", "QNSWindow", "QCocoaScreen", "UIDynamicSystemColor"
+        };
+        for (size_t i = 0; i < sizeof classNames / sizeof classNames[0]; i++)
+            ms_log_runtime_class_identity(classNames[i]);
+    });
     return screen;
 }
 + (NSArray *)screens { return @[ [NSScreen mainScreen] ]; }

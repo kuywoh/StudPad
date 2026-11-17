@@ -36,7 +36,7 @@ const CFStringRef kUTTagClassOSType = CFSTR("com.apple.ostype");
 // The Cocoa plugin requires a coherent display ID across CoreGraphics and NSScreen. iOS
 // exposes the physical screen through UIKit, so the host supplies its bounds before Qt starts.
 static const uint32_t STUDPAD_MAIN_DISPLAY_ID = 1;
-static CGRect gMainDisplayBounds = CGRectZero;
+static CGRect gMainDisplayBounds = {{0.0, 0.0}, {0.0, 0.0}};
 
 void studpad_set_main_screen_bounds(CGRect bounds) {
     gMainDisplayBounds = CGRectIsEmpty(bounds) ? CGRectZero : CGRectStandardize(bounds);

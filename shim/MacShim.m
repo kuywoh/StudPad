@@ -2211,13 +2211,17 @@ void studpad_guest_start(void) {
     // Qt's own platform plugin is the only path that can produce a visible Studio window.
     NSString *platform = options[@"QtPlatform"] ? options[@"QtPlatform"] : @"cocoa";
     NSString *style = options[@"QtStyle"] ? options[@"QtStyle"] : @"fusion";
-    studpad_log("Qt platform: %s, style: %s (Documents/studpad.plist)", platform.UTF8String,
-                style.UTF8String);
+    // Keep the Cocoa QPA backend for its UIKit-hosted window and input bridge, but select Qt's
+    // generic theme. QCocoaTheme builds its startup palette by messaging AppKit NSColor objects,
+    // which are not fully implemented by iOS; entering that path crashes before QApplication opens.
+    studpad_log("Qt platform: %s, style: %s, theme: generic (avoids QCocoaTheme palette)",
+                platform.UTF8String, style.UTF8String);
 
     setenv("QT_PLUGIN_PATH", plugins.fileSystemRepresentation, 1);
     setenv("QT_QPA_PLATFORM_PLUGIN_PATH",
            [plugins stringByAppendingPathComponent:@"platforms"].fileSystemRepresentation, 1);
     setenv("QT_QPA_PLATFORM", platform.UTF8String, 1);
+    setenv("QT_QPA_PLATFORMTHEME", "generic", 1);
     setenv("QT_STYLE_OVERRIDE", style.UTF8String, 1);
     setenv("QT_LOGGING_RULES", "qt.qpa.*=true", 1);
     setenv("QT_LOGGING_TO_CONSOLE", "1", 1);

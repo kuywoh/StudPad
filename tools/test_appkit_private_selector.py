@@ -212,5 +212,18 @@ class HostDiagnosticsTests(unittest.TestCase):
         self.assertIn("popoverPresentationController.sourceRect", self.source)
 
 
+class QtPlatformThemeStartupTests(unittest.TestCase):
+    def test_cocoa_window_backend_uses_generic_theme(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("void studpad_guest_start(void)")
+        setup = source[start : source.index('uint32_t before = _dyld_image_count();', start)]
+
+        self.assertIn('setenv("QT_QPA_PLATFORM", platform.UTF8String, 1);', setup)
+        self.assertIn('setenv("QT_QPA_PLATFORMTHEME", "generic", 1);', setup)
+        self.assertIn("theme: generic (avoids QCocoaTheme palette)", setup)
+
+
 if __name__ == "__main__":
     unittest.main()

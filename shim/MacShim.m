@@ -582,11 +582,18 @@ static void ms_install_appkit_colors(void) {
 
     NSMutableDictionary *colors = [NSMutableDictionary dictionary];
     int added = 0;
+    int wrapped = 0;
     for (size_t i = 0; i < sizeof palette / sizeof palette[0]; i++) {
         colors[@(palette[i].selector)] = palette[i].color;
         if (ms_add_class_method(cls, palette[i].selector,
-                                (IMP)ms_nscolor_static_color, "@@:"))
+                                (IMP)ms_nscolor_static_color, "@@:")) {
             added++;
+        } else {
+            // iOS may already vend these as UIDynamicSystemColor, which lacks AppKit color methods.
+            class_replaceMethod(object_getClass(cls), sel_registerName(palette[i].selector),
+                                (IMP)ms_nscolor_static_color, "@@:");
+            wrapped++;
+        }
     }
     gAppKitColors = [colors copy];
     if (ms_add_class_method(cls, "alternatingContentBackgroundColors",
@@ -619,8 +626,8 @@ static void ms_install_appkit_colors(void) {
     class_addMethod(object_getClass(cls), sel_registerName("resolveInstanceMethod:"),
                     (IMP)ms_nscolor_resolve_instance, "B@::");
 
-    studpad_log("[shim] NSColor %s: %d palette method(s), %d conversion method(s)",
-                created ? "created" : "extended", added, conversions);
+    studpad_log("[shim] NSColor %s: %d palette method(s) added, %d existing palette method(s) wrapped, %d conversion method(s)",
+                created ? "created" : "extended", added, wrapped, conversions);
 }
 
 static void ms_pump(double seconds) {

@@ -91,6 +91,20 @@ class MSColorCompatibilityTests(unittest.TestCase):
         self.assertIn("- (id)patternImage { return nil; }", implementation)
 
 
+    def test_existing_nscolor_palette_methods_are_wrapped(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("static void ms_install_appkit_colors(void)")
+        end = source.index("\\nstatic void ms_pump", start)
+        install = source[start:end]
+
+        self.assertIn("int wrapped = 0;", install)
+        self.assertIn("class_replaceMethod(object_getClass(cls)", install)
+        self.assertIn("palette[i].selector", install)
+        self.assertIn("(IMP)ms_nscolor_static_color", install)
+
+
 class CocoaDisplayCompatibilityTests(unittest.TestCase):
     def test_uikit_bounds_and_nsscreen_id_match_coregraphics_display(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(

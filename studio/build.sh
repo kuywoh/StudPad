@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build the StudPad Studio IPA: the official arm64 macOS Studio, retargeted for iOS dyld, loaded by
-# a UIKit host through libMacShim.dylib.
+# Build a small StudPad installer IPA: a retargeted arm64 Studio engine and Qt runtime, with
+# large matching Studio Resources downloaded by the iPad app from Roblox's CDN.
 #
 # Runs on a macOS runner (GitHub Actions) or any Mac with Xcode command line tools. No Apple
 # developer account is needed: the IPA is ad-hoc signed with app/entitlements-sideload.plist and
@@ -185,10 +185,12 @@ retarget1() {
     retarget "$plugin" "$APP/Frameworks/PlugIns/$(basename "$(dirname "$plugin")")/$(basename "$plugin")"
   done
 
+  # Preserve mimalloc's process-wide interposition so Qt and Studio share one allocator heap.
+
   local src; src="$(package_app)"
-  if [ -d "$src/Contents/Resources" ]; then
-    ditto "$src/Contents/Resources" "$APP/Resources"
-  fi
+  python3 "$ROOT/studio/write_studio_manifest.py" \
+    "$WORK/fetch/fetch.txt" "$WORK/fetch/studio.zip" "$APP/StudioPackage.plist"
+  echo "Studio Resources will be downloaded on the iPad at first launch."
   cat >"$APP/qt.conf" <<'CONF'
 [Paths]
 Plugins = Frameworks/PlugIns
@@ -206,6 +208,9 @@ plan() {
   local cc=(xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 -fobjc-arc
     -I"$ROOT/shim" -Wno-deprecated-declarations)
   guard 300 "${cc[@]}" -c "$ROOT/shim/MacShim.m" -o "$WORK/MacShim.o"
+  guard 300 "${cc[@]}" -c "$ROOT/shim/TISCompatibility.c" -o "$WORK/TISCompatibility.o"
+  guard 300 "${cc[@]}" -c "$ROOT/shim/LegacyCompatibility.c" -o "$WORK/LegacyCompatibility.o"
+  guard 300 "${cc[@]}" -c "$ROOT/shim/GuestHome.c" -o "$WORK/GuestHome.o"
 
   step "plan the stubs: what Studio needs that the iOS SDK does not export"
   local shipped=() lib
@@ -226,7 +231,7 @@ plan() {
     --guest "$APP/Frameworks/StudioKit" \
     --shipped "${shipped[@]}" \
     --reexport ${reexports[@]+"${reexports[@]}"} \
-    --have-object "$WORK/MacShim.o" \
+    --have-object "$WORK/MacShim.o" "$WORK/TISCompatibility.o" "$WORK/LegacyCompatibility.o" "$WORK/GuestHome.o" \
     --stubs "$WORK/stubs.c" \
     --objc "$WORK/stubs_objc.m" \
     --reroute "$WORK/reroute.txt" \
@@ -254,7 +259,8 @@ retarget2() {
 
 link() {
   step "compile the shim sources"
-  local sources=("$WORK/stubs.c" "$WORK/stubs_objc.m")
+  local sources=("$ROOT/shim/TISCompatibility.c" "$ROOT/shim/LegacyCompatibility.c"
+    "$ROOT/shim/GuestHome.c" "$WORK/stubs.c" "$WORK/stubs_objc.m")
   [ -f "$WORK/stubs_asm.s" ] && sources+=("$WORK/stubs_asm.s")
   wc -l "${sources[@]}" || true
   local cc=(xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -c -fobjc-arc -O1
@@ -285,18 +291,38 @@ link() {
 
 host() {
   step "build the host app"
+  guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 \
+    -I"$ROOT/app" -c "$ROOT/app/zip_resources.c" -o "$WORK/zip_resources.o"
+  guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 \
+    -I"$ROOT/app" -c "$ROOT/app/sha256_file.c" -o "$WORK/sha256_file.o"
+  # Studio's allocator is a launch image, not a dlopen. libmimalloc.3.dylib overrides malloc/free
+  # through __DATA,__interpose, and dyld only collects those tuples from images loaded at launch
+  # (dyld's RuntimeState::buildInterposingTables walks the launch images). Link it into the host so
+  # it is one: a dlopen'd copy (the previous build's preload) registers nothing, StudioKit stays on
+  # mimalloc while Qt stays on libsystem_malloc, and the first cross-heap free aborts in
+  # libsystem_malloc during StudioKit's initialisers. StudioKit links the same dylib by @rpath, so
+  # the guest finds the already-loaded copy.
+  local allocator
+  allocator="$(ls "$APP/Frameworks/"libmimalloc*.dylib 2>/dev/null | head -n 1 || true)"
+  [ -n "$allocator" ] || {
+    echo "no staged libmimalloc*.dylib: Studio's allocator is missing from the package" >&2
+    return 1
+  }
+  echo "  launch allocator: $(basename "$allocator")"
   guard 300 xcrun --sdk iphoneos clang -target "$TARGET" -isysroot "$SDK" -O1 -fobjc-arc \
-    -I"$ROOT/shim" -framework UIKit -framework Foundation \
+    -I"$ROOT/shim" -I"$ROOT/app" -framework UIKit -framework Foundation \
     -L"$APP/Frameworks" -lMacShim -Wl,-rpath,@executable_path/Frameworks \
     -Wl,-platform_version,ios,"$IOS_MIN","$SDK_VER" \
-    "$ROOT/app/starter.m" -o "$APP/StudPadStudio"
+    "$ROOT/app/starter.m" "$WORK/zip_resources.o" "$WORK/sha256_file.o" -lz "$allocator" \
+    -o "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
 
   cp "$ROOT/app/Info.plist" "$APP/Info.plist"
   plutil -replace DTPlatformVersion -string "$SDK_VER" "$APP/Info.plist"
   plutil -replace DTSDKName -string "$SDK_NAME" "$APP/Info.plist"
   plutil -replace MinimumOSVersion -string "$IOS_MIN" "$APP/Info.plist"
-  local src version
+  local build_number="${GITHUB_RUN_NUMBER:-0}" src version
+  plutil -replace CFBundleVersion -string "$build_number" "$APP/Info.plist"
   src="$(package_app)"
   version="$(plutil -extract CFBundleShortVersionString raw "$src/Contents/Info.plist" 2>/dev/null || true)"
   [ -n "$version" ] && plutil -replace CFBundleShortVersionString -string "$version" "$APP/Info.plist"
@@ -306,11 +332,13 @@ host() {
 check() {
   step "check every import the shim has to satisfy"
   guard 1800 python3 "$ROOT/tools/check_binds.py" "$APP" --sdk "$SDK"
+  python3 "$ROOT/tools/disable_macho_interpose.py" --check-active "$APP/Frameworks/libmimalloc.3.dylib"
 }
 
 sign() {
   step "ad-hoc sign, carrying the entitlements the IPA asks for"
   local entitlements="$ROOT/app/entitlements-sideload.plist" binary
+  python3 "$ROOT/studio/validate_entitlements.py" "$entitlements"
   for binary in "$APP/Frameworks/StudioKit" "$APP/Frameworks/"*.dylib "$APP/"*.dylib \
     "$APP/Frameworks/PlugIns/"*/*.dylib; do
     [ -f "$binary" ] || continue
@@ -331,11 +359,13 @@ sign() {
     "$WORK/StudPadStudio.sign"
   mv "$WORK/StudPadStudio.sign" "$APP/StudPadStudio"
   chmod 755 "$APP/StudPadStudio"
-  codesign -d --entitlements - "$APP/StudPadStudio" 2>/dev/null | grep -q get-task-allow || {
-    echo "ERROR: the main executable's signature does not carry get-task-allow" >&2
+  local signed_entitlements="$WORK/signed-entitlements.plist"
+  codesign -d --entitlements :- "$APP/StudPadStudio" >"$signed_entitlements" 2>/dev/null || {
+    echo "ERROR: could not read the main executable's signed entitlements" >&2
     return 1
   }
-  echo "  main executable signed with the sideload entitlements"
+  python3 "$ROOT/studio/validate_entitlements.py" "$signed_entitlements"
+  echo "  main executable signature carries all three requested sideload entitlements"
   return 0
 }
 
@@ -368,3 +398,5 @@ case "$STAGE" in
     exit 2
     ;;
 esac
+
+

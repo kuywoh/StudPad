@@ -4,6 +4,8 @@
 #ifndef STUDPAD_MACSHIM_H
 #define STUDPAD_MACSHIM_H
 
+#include <CoreFoundation/CoreFoundation.h>
+
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -18,6 +20,8 @@ extern "C" {
 void studpad_set_log_hook(studpad_log_hook hook);
 void studpad_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const char *studpad_log_path_c(void);
+// Returns a retained CFDataRef as bytes read from path; caller releases the result.
+CFDataRef studpad_copy_file_data(const char *path);
 
 // Stubs: every symbol Studio needs that iOS does not export lands here (tools/plan_shim.py).
 void *studpad_stub(const char *name);
@@ -29,7 +33,13 @@ void studpad_guest_start(void);
 
 // Host glue: the UIViewController passes its container and spinner in.
 void studpad_host_ready(void *host_view, void *spinner);
+void studpad_set_studio_launch_path(const char *path);
+int studpad_debugger_attached(void);
+int studpad_jit_enabled(void);
+int studpad_increased_memory_enabled(void);
 void studpad_present_view(void *view);
+void studpad_set_log_overlay(void *view);
+void studpad_set_log_button(void *view);
 
 #ifdef __cplusplus
 }
@@ -43,3 +53,4 @@ void studpad_present_view(void *view);
 #endif
 
 #endif
+

@@ -1,6 +1,6 @@
 name: studio-build
 
-# Builds StudPad Studio: the official arm64 macOS Studio, retargeted for iOS, loaded through
+# Builds StudPad: the iOS-retargeted Studio engine with matching large Studio resources downloaded on first run, loaded through
 # libMacShim.dylib. The IPA contains Studio and is therefore only ever a private artifact of this
 # job; nothing binary is committed. Text reports are uploaded even when the build fails.
 #
@@ -41,6 +41,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test input mapping and sideload entitlements
+        run: |
+          set -euo pipefail
+          mkdir -p .work
+          cc -std=c11 -Wall -Wextra -Werror -Ishim tools/test_input_bridge.c -o .work/test_input_bridge
+          .work/test_input_bridge
+          cc -std=c11 -Wall -Wextra -Werror -pthread -Ishim shim/TISCompatibility.c tools/test_tis_compatibility.c -framework CoreFoundation -o .work/test_tis_compatibility
+          .work/test_tis_compatibility
+          cc -std=c11 -Wall -Wextra -Werror -Ishim shim/GuestHome.c tools/test_guest_home.c -o .work/test_guest_home
+          .work/test_guest_home
+          cc -std=c11 -Wall -Wextra -Werror -Ishim shim/LegacyCompatibility.c tools/test_legacy_compatibility.c -framework CoreFoundation -framework CoreGraphics -o .work/test_legacy_compatibility
+          .work/test_legacy_compatibility
+          cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -pthread -Iapp app/sha256_file.c tools/test_sha256_file.c -o .work/test_sha256_file
+          .work/test_sha256_file
+          python3 -m unittest tools.test_sideload_entitlements tools.test_studio_manifest tools.test_zip_resources tools.test_plan_shim tools.test_appkit_private_selector tools.test_check_binds tools.test_ios_retarget tools.test_studio_verify tools.test_macho_interpose
+          python3 studio/validate_entitlements.py app/entitlements-sideload.plist
+
       - name: Select an iOS 26 SDK Xcode
         run: |
           set -euo pipefail
@@ -58,6 +75,16 @@ jobs:
         run: |
           chmod +x studio/build.sh recon/fetch_studio.sh
           studio/build.sh fetch 2>&1 | tee -a .work-build.log
+
+      - name: Exercise the iPad ZIP extractor against the official Studio package
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Iapp app/zip_resources.c tools/zip_resources_cli.c -lz -o .work/zip_resources_cli
+          app_path="$(sed -n 's/^app=//p' .work/studio/fetch/fetch.txt)"
+          app_name="${app_path##*/}"
+          destination="$(mktemp -d "$RUNNER_TEMP/studpad-resource-extract.XXXXXX")"
+          .work/zip_resources_cli .work/studio/fetch/studio.zip "$destination" "$app_name"
+          echo "Official Studio resource extraction passed for $app_name."
 
       - name: Stage the guest, Qt and the plugins
         run: studio/build.sh stage 2>&1 | tee -a .work-build.log
@@ -107,3 +134,5 @@ jobs:
             .work/studio/StudPadStudio.ipa.sha256
           if-no-files-found: error
           retention-days: 3
+
+

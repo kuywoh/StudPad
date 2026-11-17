@@ -15,7 +15,8 @@ namespace a bind resolves only against the library its import record names, so:
 
 Outputs:
 
-    stubs.c        a C function per C symbol returning 0, logging the first time it is called
+    stubs.c        a C function per C symbol returning 0 (or -1 for status-returning functions),
+                   logging the first time it is called
     stubs_objc.m   an ObjC class per missing `_OBJC_CLASS_$_X`, inheriting MSStubObject
     stubs_asm.s    symbols whose names are not C identifiers, plus ObjC ivar/eh-type storage
     reroute.txt    the symbols whose imports must move to the shim
@@ -27,9 +28,15 @@ made every class iOS really has look absent, so the generated file redeclared `N
 empty stubs.
 
 Known limit: the stub list has no type information, so a stub for a *constant* (`NSFooMode`) is a
-function, not a valid object, and a stub for a float- or struct-returning function returns 0 in the
-integer register. A crash there is the expected way to find out which symbol needs a real
-implementation; the log names it.
+function, not a valid object, and a stub for a float-returning function returns 0 in the integer
+register. A crash there is the expected way to find out which symbol needs a real implementation;
+the log names it. Functions that return a 32-bit status get an `int32_t` stub that reports failure,
+so a missing implementation is not mistaken for success.
+
+Globals are the worst case of that limit because the failure is silent: the guest loads the
+symbol's address as if it held a pointer, gets the function's machine code, and later sends a
+message to a wild object. shim/MacShim.m defines the ones Studio binds; anything this tool would
+still stub with a global-shaped name is reported so it can be given real data there.
 """
 
 from __future__ import annotations
@@ -55,6 +62,190 @@ OBJC_EHTYPE = re.compile(r"^_OBJC_EHTYPE_\$_([A-Za-z_][A-Za-z0-9_.]*)$")
 
 SHIM_NAME = "libMacShim.dylib"
 
+# AppKit/Carbon globals: pointer variables the guest loads rather than functions it calls.
+GLOBAL_SHAPED = re.compile(
+    r"^_(NS(App|AppKitVersionNumber|AppearanceName[A-Za-z0-9_]*|"
+    r"DeviceSize|Device[A-Za-z0-9_]*ColorSpace|NamedColorSpace|PatternColorSpace|"
+    r"Pasteboard(Name|Type)[A-Za-z0-9_]*|FontWeight[A-Za-z0-9_]*)"
+    r"|NS[A-Za-z0-9_]*(Notification|PboardType|PasteboardType|RunLoopMode|"
+    r"Attribute|Subrole|Role|Action|ColorSpace|ImageName)"
+    r"|k[A-Za-z0-9_]+)$"
+)
+# The only global-shaped names that really are functions.
+GLOBAL_SHAPED_EXCEPTIONS = {
+    "_NSAccessibilityPostNotification",
+    "_NSFileTypeForHFSTypeCode",
+    "_IOServiceAddMatchingNotification",
+}
+
+# Data and non-pointer-return symbols whose ABI a generated `void *name(void)` stub cannot honour.
+# A data symbol read as a function's machine code, or a CGRect return read from x0, corrupts the
+# guest far from the call site. These must be exported by a hand-written object in --have-object;
+# if one is still unresolved, the plan fails instead of writing a plausible-looking stub.
+TYPED_DATA_SYMBOLS = {
+    "_NSApp": "shim/MacShim.m",
+    "_NSAppKitVersionNumber": "shim/MacShim.m",
+    "_NSAppearanceNameAqua": "shim/LegacyCompatibility.c",
+    "_NSAppearanceNameDarkAqua": "shim/LegacyCompatibility.c",
+    "_NSDeviceCMYKColorSpace": "shim/LegacyCompatibility.c",
+    "_NSDeviceRGBColorSpace": "shim/LegacyCompatibility.c",
+    "_NSDeviceSize": "shim/LegacyCompatibility.c",
+    "_NSFontWeightBlack": "shim/LegacyCompatibility.c",
+    "_NSFontWeightBold": "shim/LegacyCompatibility.c",
+    "_NSFontWeightHeavy": "shim/LegacyCompatibility.c",
+    "_NSFontWeightLight": "shim/LegacyCompatibility.c",
+    "_NSFontWeightMedium": "shim/LegacyCompatibility.c",
+    "_NSFontWeightRegular": "shim/LegacyCompatibility.c",
+    "_NSFontWeightSemibold": "shim/LegacyCompatibility.c",
+    "_NSFontWeightThin": "shim/LegacyCompatibility.c",
+    "_NSFontWeightUltraLight": "shim/LegacyCompatibility.c",
+    "_NSNamedColorSpace": "shim/LegacyCompatibility.c",
+    "_NSPasteboardNameDrag": "shim/TISCompatibility.c",
+    "_NSPasteboardTypeString": "shim/TISCompatibility.c",
+    "_NSPatternColorSpace": "shim/LegacyCompatibility.c",
+    "_kDADiskDescriptionDeviceModelKey": "shim/LegacyCompatibility.c",
+    "_kIOMasterPortDefault": "shim/LegacyCompatibility.c",
+    "_kSecImportExportKeychain": "shim/LegacyCompatibility.c",
+    "_kTISNotifySelectedKeyboardInputSourceChanged": "shim/TISCompatibility.c",
+    "_kTISPropertyBundleID": "shim/TISCompatibility.c",
+    "_kTISPropertyInputModeID": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceCategory": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceID": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceIsASCIICapable": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceIsEnabled": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceIsSelectCapable": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceIsSelected": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceLanguages": "shim/TISCompatibility.c",
+    "_kTISPropertyInputSourceType": "shim/TISCompatibility.c",
+    "_kTISPropertyLocalizedName": "shim/TISCompatibility.c",
+    "_kTISPropertyUnicodeKeyLayoutData": "shim/TISCompatibility.c",
+    "_kTISCategoryKeyboardInputSource": "shim/TISCompatibility.c",
+    "_kUTTagClassOSType": "shim/LegacyCompatibility.c",
+}
+
+UNSAFE_ABI_SYMBOLS = {
+    "_CGDisplayBounds": "shim/LegacyCompatibility.c",
+    "_CGDisplayModeGetRefreshRate": "shim/LegacyCompatibility.c",
+    "_CGDisplayScreenSize": "shim/LegacyCompatibility.c",
+    "_CGEventGetLocation": "shim/LegacyCompatibility.c",
+    "_CGGetDisplaysWithRect": "shim/LegacyCompatibility.c",
+    "_CGGetOnlineDisplayList": "shim/LegacyCompatibility.c",
+    "_CVDisplayLinkCreateWithCGDisplay": "shim/LegacyCompatibility.c",
+    "_CVDisplayLinkSetOutputCallback": "shim/LegacyCompatibility.c",
+    "_CVDisplayLinkStart": "shim/LegacyCompatibility.c",
+    "_CVDisplayLinkStop": "shim/LegacyCompatibility.c",
+    "_HIShapeGetBounds": "shim/LegacyCompatibility.c",
+    "_PMPaperGetHeight": "shim/LegacyCompatibility.c",
+    "_PMPaperGetWidth": "shim/LegacyCompatibility.c",
+}
+TYPED_SHIM_SYMBOLS = {**TYPED_DATA_SYMBOLS, **UNSAFE_ABI_SYMBOLS}
+
+# Functions that return a 32-bit OSStatus/IOReturn/CVReturn/kern_return_t/HRESULT. A generic stub
+# returns NULL in x0, which those callers read as status 0 ("success") while every out parameter
+# is still uninitialised. Generate an int32_t stub that returns -1 instead. Callers check the
+# failure and do not consume the outputs.
+STATUS_RETURN_SYMBOLS = {
+    "_CGAssociateMouseAndMouseCursorPosition",
+    "_CGDisplayRegisterReconfigurationCallback",
+    "_CGDisplayRemoveReconfigurationCallback",
+    "_CGSClearWindowTags",
+    "_CGSSetWindowTags",
+    "_CGWarpMouseCursorPosition",
+    "_FFCreateDevice",
+    "_FFDeviceCreateEffect",
+    "_FFDeviceGetForceFeedbackCapabilities",
+    "_FFDeviceGetForceFeedbackProperty",
+    "_FFDeviceReleaseEffect",
+    "_FFDeviceSendForceFeedbackCommand",
+    "_FFDeviceSetForceFeedbackProperty",
+    "_FFEffectGetEffectStatus",
+    "_FFEffectSetParameters",
+    "_FFEffectStart",
+    "_FFEffectStop",
+    "_FFIsForceFeedback",
+    "_FFReleaseDevice",
+    "_GetIconRef",
+    "_HIThemeDrawTitleBarWidget",
+    "_HIThemeDrawWindowFrame",
+    "_HIThemeGetWindowShape",
+    "_IOHIDDeviceClose",
+    "_IOHIDDeviceGetReport",
+    "_IOHIDDeviceGetValue",
+    "_IOHIDDeviceOpen",
+    "_IOHIDDeviceSetReport",
+    "_IOHIDManagerClose",
+    "_IOHIDManagerOpen",
+    "_IOObjectRelease",
+    "_IOObjectRetain",
+    "_IORegistryEntryCreateCFProperties",
+    "_IORegistryEntryGetParentEntry",
+    "_IORegistryEntryGetRegistryEntryID",
+    "_IOServiceAddMatchingNotification",
+    "_IOServiceGetMatchingServices",
+    "_PMCreatePageFormat",
+    "_PMCreatePageFormatWithPMPaper",
+    "_PMCreatePrintSettings",
+    "_PMCreateSession",
+    "_PMGetCollate",
+    "_PMGetCopies",
+    "_PMGetDuplex",
+    "_PMGetFirstPage",
+    "_PMGetLastPage",
+    "_PMGetOrientation",
+    "_PMGetPageFormatPaper",
+    "_PMGetUnadjustedPaperRect",
+    "_PMPaperCreateCustom",
+    "_PMPaperGetMargins",
+    "_PMPaperGetPPDPaperName",
+    "_PMPrintSettingsGetJobName",
+    "_PMPrintSettingsSetJobName",
+    "_PMPrinterGetIndexedPrinterResolution",
+    "_PMPrinterGetOutputResolution",
+    "_PMPrinterGetPaperList",
+    "_PMPrinterGetPrinterResolutionCount",
+    "_PMPrinterSetOutputResolution",
+    "_PMServerCreatePrinterList",
+    "_PMSessionBeginCGDocumentNoDialog",
+    "_PMSessionBeginPageNoDialog",
+    "_PMSessionCopyDestinationLocation",
+    "_PMSessionDefaultPageFormat",
+    "_PMSessionDefaultPrintSettings",
+    "_PMSessionEndDocumentNoDialog",
+    "_PMSessionEndPageNoDialog",
+    "_PMSessionError",
+    "_PMSessionGetCGGraphicsContext",
+    "_PMSessionGetCurrentPrinter",
+    "_PMSessionGetDestinationType",
+    "_PMSessionSetCurrentPMPrinter",
+    "_PMSessionSetDestination",
+    "_PMSessionValidatePageFormat",
+    "_PMSessionValidatePrintSettings",
+    "_PMSetCollate",
+    "_PMSetCopies",
+    "_PMSetDuplex",
+    "_PMSetFirstPage",
+    "_PMSetLastPage",
+    "_PMSetOrientation",
+    "_PMSetPageRange",
+    "_PlotIconRefInContext",
+    "_ReleaseIconRef",
+    "_SSLSetDiffieHellmanParams",
+    "_SecKeychainCreate",
+    "_SecKeychainDelete",
+    "_SecKeychainFindInternetPassword",
+    "_SecKeychainItemCopyContent",
+    "_SecKeychainItemFreeContent",
+    "_SecKeychainSetSettings",
+    "_SecTrustSettingsCopyCertificates",
+    "_SecTrustSettingsCopyTrustSettings",
+    "_UCCompareCollationKeys",
+    "_UCCompareText",
+    "_UCCreateCollator",
+    "_UCDisposeCollator",
+    "_UCGetCollationKey",
+    "_UCKeyTranslate",
+}
+
 # Must match the -Wl,-reexport_framework list in studio/build.sh.
 REEXPORTS = [
     "Foundation",
@@ -71,9 +262,23 @@ REEXPORTS = [
     "AudioToolbox",
 ]
 
-# Classes that must never be replaced by a stub, whatever the SDK scan says: objc itself, the shim's
-# own root class, and NSObject are load-bearing for every other class.
-NEVER_STUB_CLASSES = {"NSObject", "NSProxy", "MSStubObject"}
+# Core Foundation classes must resolve to the iOS Foundation re-export, never to the generated
+# MSStubObject placeholders. The SDK scan can miss class exports when a macOS ordinal is absorbed.
+FOUNDATION_RUNTIME_CLASSES = {
+    "NSArray", "NSMutableArray", "NSDictionary", "NSMutableDictionary", "NSSet", "NSMutableSet",
+    "NSString", "NSMutableString", "NSNumber", "NSDecimalNumber", "NSData", "NSMutableData",
+    "NSDate", "NSNull", "NSValue", "NSError", "NSException", "NSBundle", "NSFileManager",
+    "NSProcessInfo", "NSNotification", "NSNotificationCenter", "NSNotificationQueue",
+    "NSOperation", "NSOperationQueue", "NSThread", "NSRunLoop", "NSLock", "NSCondition",
+    "NSUUID", "NSLocale", "NSCharacterSet", "NSPredicate", "NSPropertyListSerialization",
+    "NSJSONSerialization", "NSXMLParser", "NSUserDefaults", "NSIndexPath", "NSIndexSet",
+    "NSURL", "NSURLComponents", "NSURLQueryItem", "NSURLRequest", "NSMutableURLRequest",
+    "NSURLResponse", "NSHTTPURLResponse", "NSURLSession", "NSURLSessionConfiguration",
+    "NSURLSessionTask", "NSURLSessionDataTask", "NSURLSessionDownloadTask",
+    "NSURLSessionUploadTask", "NSURLCache", "NSHTTPCookie", "NSHTTPCookieStorage",
+    "NSCachedURLResponse", "NSURLCredential", "NSURLCredentialStorage", "NSURLProtectionSpace",
+}
+NEVER_STUB_CLASSES = {"NSObject", "NSProxy", "MSStubObject"} | FOUNDATION_RUNTIME_CLASSES
 
 
 def sdk_symbols(sdk: str) -> set[str]:
@@ -126,13 +331,38 @@ def classify(symbols: list[str]) -> dict[str, list[str]]:
     return groups
 
 
+def unsafe_stub_symbols(symbols: list[str]) -> list[str]:
+    """Symbols a generic `void *name(void)` stub cannot safely answer.
+
+    Data symbols are read with a pointer load, so a generated function's code address is handed to
+    the guest as if it were an object. Struct-returning functions return in registers the generic
+    stub never fills. Both are refused: add a definition to TYPED_DATA_SYMBOLS/UNSAFE_ABI_SYMBOLS
+    (or an explicit name exception) before the plan can write stubs.
+    """
+    return sorted(
+        symbol
+        for symbol in symbols
+        if symbol in UNSAFE_ABI_SYMBOLS
+        or (
+            symbol not in STATUS_RETURN_SYMBOLS
+            and GLOBAL_SHAPED.match(symbol)
+            and symbol not in GLOBAL_SHAPED_EXCEPTIONS
+        )
+    )
+
+
 def write_c_stubs(groups: dict[str, list[str]], path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write("// Generated by tools/plan_shim.py: iOS does not export these, so the shim does.\n")
-        f.write("// Each one returns 0 and logs once. Replace the ones Studio actually needs.\n")
+        f.write("// Generic stubs return 0; status-returning ones return -1. All log once.\n")
+        f.write("#include <stdint.h>\n\n")
         f.write('#include "MacShim.h"\n\n')
         for sym in sorted(groups["functions"]):
-            f.write(f'void *{sym[1:]}(void) {{ return studpad_stub("{sym[1:]}"); }}\n')
+            name = sym[1:]
+            if sym in STATUS_RETURN_SYMBOLS:
+                f.write(f'int32_t {name}(void) {{ studpad_stub("{name}"); return -1; }}\n')
+            else:
+                f.write(f'void *{name}(void) {{ return studpad_stub("{name}"); }}\n')
         for sym in sorted(groups["classes"]):
             f.write(f"// {sym}: generated as an ObjC class in stubs_objc.m\n")
         for sym in sorted(groups["ivars"]):
@@ -337,6 +567,27 @@ def main() -> int:
         raise SystemExit("no missing symbols: has Studio changed shape?")
 
     groups = classify(stubs)
+    suspects = unsafe_stub_symbols(groups["functions"] + groups["asm"])
+    if suspects:
+        print(
+            f"  ERROR: {len(suspects)} unresolved symbol(s) cannot use a generic void * stub:",
+            file=sys.stderr,
+        )
+        for symbol in suspects:
+            target = TYPED_SHIM_SYMBOLS.get(symbol)
+            if target:
+                print(f"    {symbol}: expected a typed definition in {target}", file=sys.stderr)
+            else:
+                print(
+                    f"    {symbol}: add a typed definition to shim/MacShim.m, "
+                    "shim/LegacyCompatibility.c or an explicit GLOBAL_SHAPED_EXCEPTIONS entry",
+                    file=sys.stderr,
+                )
+        print(
+            "  Refusing to write a function stub where the guest expects data or a struct return.",
+            file=sys.stderr,
+        )
+        return 1
     write_c_stubs(groups, args.stubs)
     classes = write_objc_stubs(groups, args.objc)
     with open(args.reroute, "w", encoding="utf-8") as f:

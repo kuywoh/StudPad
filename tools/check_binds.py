@@ -50,39 +50,62 @@ def _add_tbd_value(section: str, value: str, found: set[str]) -> None:
 
 
 def tbd_symbols(text: str) -> set[str]:
-    """Every symbol a .tbd exports, in both of the shapes the file uses.
+    """Every symbol a .tbd exports, in both shapes used by the file.
 
-    Plain symbols are inline lists that wrap over many lines, so they are found with a token scan.
-    objc-classes / objc-ivars / objc-eh-types hold bare names (NSAlert, NSView._frame), which the
-    linker turns into `_OBJC_CLASS_$_NSAlert` and friends; those need the section parser.
+    Plain symbols and ObjC metadata are inline lists that often wrap over several lines. ObjC
+    classes in particular are otherwise mistaken for missing exports, which can make the shim
+    checker reject valid Foundation re-exports.
     """
     found: set[str] = set(SDK_SYMBOL_TEXT.findall(text))
     section = None
-    for line in text.splitlines():
-        stripped = line.strip()
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
         if not stripped or stripped.startswith("#"):
+            i += 1
             continue
         if stripped.startswith("- "):
             item = stripped[2:].strip()
-            if re.match(r"^[a-z-]+:\s", item) or item.endswith(":"):
+            if re.match(r"^[a-z-]+:", item) or item.endswith(":"):
                 section = None
-                continue
-            if section:
+            elif section:
                 _add_tbd_value(section, item, found)
+            i += 1
             continue
         key, sep, rest = stripped.partition(":")
         if not sep:
+            i += 1
             continue
         key, rest = key.strip(), rest.strip()
-        if rest.startswith("[") and rest.endswith("]"):
-            section = None
-            for item in rest[1:-1].split(","):
+        if rest.startswith("["):
+            values = rest[1:]
+            while "]" not in values and i + 1 < len(lines):
+                i += 1
+                values += " " + lines[i].strip()
+            values = values.partition("]")[0]
+            for item in values.split(","):
                 _add_tbd_value(key, item.strip(), found)
+            section = None
         elif rest:
             section = None
         else:
             section = key
+        i += 1
     return found
+
+ALLOCATOR_SYMBOLS = {
+    "_malloc", "_free", "_calloc", "_realloc", "_reallocf", "_posix_memalign",
+    "_aligned_alloc", "_valloc", "_malloc_size", "_malloc_good_size",
+    "_mi_malloc", "_mi_free", "_mi_calloc", "_mi_realloc",
+}
+
+
+def is_allocator_symbol(symbol: str) -> bool:
+    return symbol in ALLOCATOR_SYMBOLS or symbol.startswith(
+        ("_malloc_zone_", "_mi_", "__Zn", "__Zd", "_Zn", "_Zd")
+    )
+
 
 MACOS_FRAMEWORKS = (
     "/System/Library/Frameworks/AppKit.framework",
@@ -514,6 +537,11 @@ def main() -> int:
             unreadable += 1
             continue
         for symbol, library in pairs:
+            if is_allocator_symbol(symbol):
+                print(
+                    f"  allocator binding: {os.path.relpath(path, args.app)}: "
+                    f"{symbol} -> {library}"
+                )
             if os.path.basename(library) == "libMacShim.dylib":
                 want.setdefault(symbol, []).append(os.path.relpath(path, args.app))
             elif library.startswith(MACOS_FRAMEWORKS):

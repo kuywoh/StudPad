@@ -8,7 +8,8 @@
 //   MSStubObject     root class for the generated AppKit/Carbon classes: an unknown selector on any
 //                    of them logs and returns 0 instead of raising
 //   AppKit slice     NSApplication, NSWindow, NSView, NSEvent, NSScreen, NSMenu, NSMenuItem,
-//                    NSGraphicsContext, NSOpenGLContext, NSOpenGLPixelFormat over UIKit
+//                    NSGraphicsContext over UIKit; logged NSOpenGL stubs; AppKit's NSColor
+//                    palette and colour conversion answered over UIKit's semantic colours
 //   re-exports       Foundation, UIKit, CoreFoundation, CoreGraphics, QuartzCore, CoreText,
 //                    Security, Metal, GameController, UniformTypeIdentifiers, AudioToolbox
 //
@@ -16,6 +17,9 @@
 // per symbol the iOS SDK does not export.
 
 #import "MacShim.h"
+#import "GuestHome.h"
+#import "InputBridge.h"
+#import "LegacyCompatibility.h"
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -27,6 +31,8 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <pwd.h>
+#import <stdio.h>
 #import <fcntl.h>
 #import <execinfo.h>
 #import <signal.h>
@@ -35,7 +41,10 @@
 #import <stdlib.h>
 #import <string.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import <sys/sysctl.h>
+#import <limits.h>
+#import <stdint.h>
 #import <unistd.h>
 #import <os/proc.h>
 
@@ -50,16 +59,34 @@ static NSString *studpad_log_path(void) {
     static NSString *path = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask,
-                                                             YES).firstObject;
-        path = [docs stringByAppendingPathComponent:@"studio.log"];
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSString *directory = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                                 NSUserDomainMask, YES).firstObject;
+        // A fresh install does not always have Documents. Without it open() failed with ENOENT and
+        // every log line was dropped, which is why a crash left no evidence behind.
+        if (directory.length == 0) {
+            const char *home = getenv("HOME");
+            if (home && *home) {
+                directory = [[NSString stringWithUTF8String:home]
+                    stringByAppendingPathComponent:@"Documents"];
+            }
+        }
+        if (directory.length == 0) directory = NSTemporaryDirectory();
+        [manager createDirectoryAtPath:directory
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:nil];
+        path = [directory stringByAppendingPathComponent:@"studio.log"];
     });
-    return path;
+    return path ?: @"";
 }
 
 static void studpad_open_log(void) {
     if (gLogFd >= 0) return;
-    gLogFd = open(studpad_log_path().fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    NSString *logPath = studpad_log_path();
+    [[NSFileManager defaultManager] createDirectoryAtPath:logPath.stringByDeletingLastPathComponent
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    gLogFd = open(logPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (gLogFd >= 0) {
         dup2(gLogFd, STDOUT_FILENO);
         dup2(gLogFd, STDERR_FILENO);
@@ -109,24 +136,182 @@ void *studpad_stub_asm(void) {
 
 long studpad_stub_count(void) { return gStubTotal; }
 
+/*
+ * Read a file without relying on NSData's legacy file initializer. Returns a retained CFDataRef;
+ * the app host and the NSDictionary/NSData compatibility methods share this path.
+ */
+CFDataRef studpad_copy_file_data(const char *path) {
+    if (!path || !*path) return NULL;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    struct stat info;
+    if (fstat(fd, &info) != 0 || info.st_size < 0 ||
+        (uintmax_t)info.st_size > (uintmax_t)LONG_MAX ||
+        (uintmax_t)info.st_size > (uintmax_t)SIZE_MAX) {
+        close(fd);
+        return NULL;
+    }
+
+    size_t length = (size_t)info.st_size;
+    UInt8 *bytes = malloc(length ? length : 1);
+    if (!bytes) {
+        close(fd);
+        return NULL;
+    }
+
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > 1024u * 1024u) chunk = 1024u * 1024u;
+        ssize_t count = read(fd, bytes + offset, chunk);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            free(bytes);
+            close(fd);
+            return NULL;
+        }
+        offset += (size_t)count;
+    }
+    close(fd);
+
+    CFDataRef data = CFDataCreate(kCFAllocatorDefault, bytes, (CFIndex)length);
+    free(bytes);
+    return data;
+}
+
 // ---------------------------------------------------------------------------------------------
 // MSStubObject
 // ---------------------------------------------------------------------------------------------
 
-static void ms_zero_imp(id self, SEL _cmd) { (void)self; (void)_cmd; }
+// An unknown selector has no compiled method type at runtime, so the stub cannot know whether the
+// caller expects an object, a BOOL, an integer or a struct. A plain `void` C function leaves the
+// receiver in x0, which means -[NSSomething unknownObjectReturn] answers `self` and a struct-return
+// call reads garbage. Zero the return registers the AArch64 ABI uses: x0-x7 and d0-d7 cover object,
+// integer, pointer, CGRect/NSSize/NSPoint/NSRange and float/double returns.
+#if defined(__arm64__)
+__attribute__((naked)) static void ms_zero_return_imp(void) {
+    __asm__ volatile(
+        "mov x0, xzr\n\t"
+        "mov x1, xzr\n\t"
+        "mov x2, xzr\n\t"
+        "mov x3, xzr\n\t"
+        "mov x4, xzr\n\t"
+        "mov x5, xzr\n\t"
+        "mov x6, xzr\n\t"
+        "mov x7, xzr\n\t"
+        "fmov d0, xzr\n\t"
+        "fmov d1, xzr\n\t"
+        "fmov d2, xzr\n\t"
+        "fmov d3, xzr\n\t"
+        "fmov d4, xzr\n\t"
+        "fmov d5, xzr\n\t"
+        "fmov d6, xzr\n\t"
+        "fmov d7, xzr\n\t"
+        "ret\n\t");
+}
+#else
+static void ms_zero_return_imp(void) {}
+#endif
+
+// Some Studio builds send legacy Foundation file-loading selectors that are not implemented
+// by the iOS Foundation classes. Use the CFData reader above, then parse standard property lists.
+static id ms_dictionary_contents_of_file(id receiver, SEL command, NSString *path) {
+    (void)receiver;
+    (void)command;
+    if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    if (!data) return nil;
+    CFErrorRef error = NULL;
+    CFPropertyListRef value = CFPropertyListCreateWithData(
+        kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
+    if (error) CFRelease(error);
+    if (!value) return nil;
+    if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {
+        CFRelease(value);
+        return nil;
+    }
+    return CFBridgingRelease(value);
+}
+
+static id ms_url_with_string(id receiver, SEL command, NSString *string) {
+    (void)receiver;
+    (void)command;
+    if (![string isKindOfClass:NSString.class]) return nil;
+    CFURLRef url = CFURLCreateWithString(kCFAllocatorDefault, (__bridge CFStringRef)string, NULL);
+    return url ? CFBridgingRelease(url) : nil;
+}
+
+static id ms_data_contents_of_file(id receiver, SEL command, NSString *path) {
+    (void)receiver;
+    (void)command;
+    if (![path isKindOfClass:NSString.class] || path.length == 0) return nil;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    return data ? CFBridgingRelease(data) : nil;
+}
+
+static BOOL ms_install_file_reader(Class cls, SEL selector, IMP implementation,
+                                   const char *description) {
+    if (!cls) return NO;
+    if (class_getClassMethod(cls, selector)) return YES;
+    if (class_addMethod(object_getClass(cls), selector, implementation, "@@:@")) {
+        studpad_log("[shim] installed %s compatibility reader", description);
+        return YES;
+    }
+    if (class_getClassMethod(cls, selector)) return YES;
+    studpad_log("[shim] failed to install %s compatibility reader", description);
+    return NO;
+}
+
+static void ms_install_foundation_file_readers(void) {
+    ms_install_file_reader(objc_getClass("NSDictionary"),
+        sel_registerName("dictionaryWithContentsOfFile:"),
+        (IMP)ms_dictionary_contents_of_file, "NSDictionary");
+    ms_install_file_reader(objc_getClass("NSData"),
+        sel_registerName("dataWithContentsOfFile:"),
+        (IMP)ms_data_contents_of_file, "NSData");
+    ms_install_file_reader(objc_getClass("NSURL"),
+        sel_registerName("URLWithString:"),
+        (IMP)ms_url_with_string, "NSURL");
+}
+
+static void ms_install_appkit_colors(void);
+static void ms_install_appkit_alerts(void);
 
 @implementation MSStubObject
+
++ (void)load {
+    ms_install_foundation_file_readers();
+    ms_install_appkit_colors();
+    ms_install_appkit_alerts();
+}
 
 + (BOOL)ms_claim:(SEL)sel isClass:(BOOL)isClass {
     studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(self), sel_getName(sel));
     if (isClass ? class_getClassMethod(self, sel) : class_getInstanceMethod(self, sel)) return NO;
     Class target = isClass ? object_getClass(self) : self;
-    return class_addMethod(target, sel, (IMP)ms_zero_imp, "v@:");
+    return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "v@:");
 }
 
 + (BOOL)resolveInstanceMethod:(SEL)sel { return [self ms_claim:sel isClass:NO]; }
-+ (BOOL)resolveClassMethod:(SEL)sel { return [self ms_claim:sel isClass:YES]; }
-
++ (BOOL)resolveClassMethod:(SEL)sel {
+    const char *name = class_getName(self);
+    if (strcmp(name, "NSDictionary") == 0 &&
+        sel_isEqual(sel, sel_registerName("dictionaryWithContentsOfFile:"))) {
+        return ms_install_file_reader(self, sel, (IMP)ms_dictionary_contents_of_file,
+                                      "NSDictionary");
+    }
+    if (strcmp(name, "NSData") == 0 &&
+        sel_isEqual(sel, sel_registerName("dataWithContentsOfFile:"))) {
+        return ms_install_file_reader(self, sel, (IMP)ms_data_contents_of_file, "NSData");
+    }
+    if (strcmp(name, "NSURL") == 0 &&
+        sel_isEqual(sel, sel_registerName("URLWithString:"))) {
+        return ms_install_file_reader(self, sel, (IMP)ms_url_with_string, "NSURL");
+    }
+    return [self ms_claim:sel isClass:YES];
+}
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
     (void)sel;
     return [NSMethodSignature signatureWithObjCTypes:"@@:@@@@@@@@"];
@@ -148,6 +333,327 @@ static void ms_zero_imp(id self, SEL _cmd) { (void)self; (void)_cmd; }
 }
 
 @end
+
+// Qt's Cocoa message dialog sends this AppKit setter; iOS may expose NSAlert without it.
+// Install a correctly typed no-op so repeated dialog setup does not fall into generic forwarding.
+static void ms_nsalert_set_style(id self, SEL _cmd, NSInteger style) {
+    (void)self;
+    (void)_cmd;
+    (void)style;
+}
+
+static void ms_install_appkit_alerts(void) {
+    Class cls = objc_lookUpClass("NSAlert");
+    if (!cls) {
+        cls = objc_allocateClassPair([MSStubObject class], "NSAlert", 0);
+        if (cls) objc_registerClassPair(cls);
+    }
+    if (!cls) {
+        studpad_log("[shim] could not install NSAlert style compatibility");
+        return;
+    }
+    class_replaceMethod(cls, sel_registerName("setAlertStyle:"),
+                        (IMP)ms_nsalert_set_style, "v@:q");
+    studpad_log("[shim] NSAlert setAlertStyle: compatibility active");
+}
+
+// ---------------------------------------------------------------------------------------------
+// NSColor: AppKit's palette over UIKit
+// ---------------------------------------------------------------------------------------------
+//
+// Qt's cocoa plugin builds its QPalette from AppKit's NSColor statics and converts each colour with
+// -type, -colorSpace, -colorUsingColorSpace: and -getRed:green:blue:alpha: (qt_mac_toQColor in
+// Qt 6.4's src/gui/painting/qcoregraphics.mm). iOS has a real NSColor class but neither the AppKit
+// palette nor the whole conversion surface, so Qt's first palette lookup raised
+// +[NSColor controlTextColor] and took Studio down while QApplication was being constructed.
+// Add what the class does not already answer, backed by UIKit's semantic colours; leave the rest.
+
+@interface MSColor : MSStubObject
+- (instancetype)initWithColor:(UIColor *)color;
+@property (nonatomic, strong) UIColor *color;
+@end
+
+static id ms_nil_imp(id self, SEL _cmd) { (void)self; (void)_cmd; return nil; }
+
+static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
+
+@implementation MSColor
+
+- (instancetype)initWithColor:(UIColor *)color {
+    if ((self = [super init])) _color = color;
+    return self;
+}
+
+// These wrappers contain solid UIKit colors. Report component-based so Qt never treats
+// them as image patterns and sends a nil patternImage to its renderer.
+- (NSInteger)type { return 0; }
+- (NSString *)className { return @"NSColor"; }
+- (NSString *)catalogNameComponent { return @"Shim"; }
+- (NSString *)colorNameComponent { return @"shim"; }
+- (NSString *)colorSpaceName { return (__bridge NSString *)NSDeviceRGBColorSpace; }
+- (id)colorSpace { return nil; }
+- (NSInteger)numberOfComponents { return 4; }
+- (id)colorUsingColorSpace:(id)space { (void)space; return self; }
+- (id)colorUsingColorSpaceName:(id)name {
+    NSString *spaceName = [name isKindOfClass:NSString.class] ? name : nil;
+    // Qt 5 treats every non-nil NSPatternColorSpace conversion as an image pattern.
+    if ([spaceName isEqualToString:(__bridge NSString *)NSPatternColorSpace]) return nil;
+    return self;
+}
+- (id)highlightWithLevel:(CGFloat)level { (void)level; return self; }
+- (id)colorWithAlphaComponent:(CGFloat)alpha {
+    return [[MSColor alloc] initWithColor:[_color colorWithAlphaComponent:alpha]];
+}
+// The shim's MSColor instances wrap solid UIKit colors, never AppKit image patterns.
+- (id)patternImage { return nil; }
+
+- (CGColorRef)CGColor { return _color.CGColor; }
+
+- (BOOL)getRed:(CGFloat *)red green:(CGFloat *)green blue:(CGFloat *)blue alpha:(CGFloat *)alpha {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (![_color getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat white = 0;
+        if ([_color getWhite:&white alpha:&a]) r = g = b = white;
+    }
+    if (red) *red = r;
+    if (green) *green = g;
+    if (blue) *blue = b;
+    if (alpha) *alpha = a;
+    return YES;
+}
+
+- (void)getComponents:(CGFloat *)components {
+    if (!components) return;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    [self getRed:&r green:&g blue:&b alpha:&a];
+    components[0] = r;
+    components[1] = g;
+    components[2] = b;
+    components[3] = a;
+}
+
+@end
+
+// Conversion for colours the system vends itself ([NSColor windowBackgroundColor] and friends may
+// already exist): read them through CGColor so any UIKit/AppKit colour object works.
+static BOOL ms_generic_get_rgba(id self, SEL _cmd, CGFloat *red, CGFloat *green, CGFloat *blue,
+                                CGFloat *alpha) {
+    (void)_cmd;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if ([(id)self respondsToSelector:@selector(CGColor)]) {
+        CGColorRef cg = [(MSColor *)self CGColor];
+        CGColorSpaceRef space = cg ? CGColorGetColorSpace(cg) : NULL;
+        const CGFloat *components = cg ? CGColorGetComponents(cg) : NULL;
+        size_t count = cg ? CGColorGetNumberOfComponents(cg) : 0;
+        if (components && count) {
+            CGColorSpaceModel model = space ? CGColorSpaceGetModel(space) : kCGColorSpaceModelUnknown;
+            if (model == kCGColorSpaceModelMonochrome && count >= 2) {
+                r = g = b = components[0];
+                a = components[1];
+            } else if (count >= 4) {
+                r = components[0];
+                g = components[1];
+                b = components[2];
+                a = components[3];
+            } else if (count == 3) {
+                r = components[0];
+                g = components[1];
+                b = components[2];
+            }
+        }
+    }
+    if (red) *red = r;
+    if (green) *green = g;
+    if (blue) *blue = b;
+    if (alpha) *alpha = a;
+    return YES;
+}
+
+static void ms_generic_get_components(id self, SEL _cmd, CGFloat *components) {
+    if (!components) return;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    ms_generic_get_rgba(self, _cmd, &r, &g, &b, &a);
+    components[0] = r;
+    components[1] = g;
+    components[2] = b;
+    components[3] = a;
+}
+
+static NSString *ms_nscolor_class_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"NSColor";
+}
+
+static NSString *ms_nscolor_catalog_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"Shim";
+}
+
+static NSString *ms_nscolor_color_name(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @"shim";
+}
+
+static NSInteger ms_nscolor_type(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return 2;
+}
+
+static NSInteger ms_nscolor_component_count(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return 4;
+}
+
+static id ms_nscolor_no_color_space(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return nil;
+}
+
+static NSDictionary<NSString *, UIColor *> *gAppKitColors = nil;
+
+static id ms_nscolor_static_color(id self, SEL _cmd) {
+    (void)self;
+    UIColor *color = gAppKitColors[@(sel_getName(_cmd))];
+    return color ? [[MSColor alloc] initWithColor:color] : nil;
+}
+
+static id ms_nscolor_alternating_backgrounds(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return @[ [[MSColor alloc] initWithColor:UIColor.systemBackgroundColor],
+              [[MSColor alloc] initWithColor:UIColor.secondarySystemBackgroundColor] ];
+}
+
+// Answer an unimplemented method instead of letting the runtime raise, so the log names the next
+// AppKit API Studio needs rather than the process dying in QApplication's constructor.
+static BOOL ms_nscolor_claim(id self, SEL _cmd, SEL sel, BOOL isClass) {
+    (void)_cmd;
+    // resolveInstanceMethod: passes an instance, not a class. Casting that instance to Class made
+    // class_addMethod read and write through its object memory as if it were a class, which can
+    // abort while Qt builds the palette.
+    Class cls = isClass ? (Class)self : object_getClass(self);
+    studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(cls), sel_getName(sel));
+    Class target = isClass ? object_getClass(cls) : cls;
+    if (class_getInstanceMethod(target, sel)) return NO;
+    return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "@@:");
+}
+
+static BOOL ms_nscolor_resolve_class(id self, SEL _cmd, SEL sel) {
+    return ms_nscolor_claim(self, _cmd, sel, YES);
+}
+
+static BOOL ms_nscolor_resolve_instance(id self, SEL _cmd, SEL sel) {
+    return ms_nscolor_claim(self, _cmd, sel, NO);
+}
+
+static BOOL ms_add_class_method(Class cls, const char *name, IMP implementation, const char *types) {
+    SEL selector = sel_registerName(name);
+    if (class_getClassMethod(cls, selector)) return NO;
+    return class_addMethod(object_getClass(cls), selector, implementation, types);
+}
+
+static BOOL ms_add_instance_method(Class cls, const char *name, IMP implementation,
+                                   const char *types) {
+    SEL selector = sel_registerName(name);
+    if (class_getInstanceMethod(cls, selector)) return NO;
+    return class_addMethod(cls, selector, implementation, types);
+}
+
+static void ms_install_appkit_colors(void) {
+    struct { const char *selector; UIColor *color; } palette[] = {
+        {"windowBackgroundColor", UIColor.systemBackgroundColor},
+        {"controlBackgroundColor", UIColor.secondarySystemBackgroundColor},
+        {"textBackgroundColor", UIColor.systemBackgroundColor},
+        {"controlColor", UIColor.tertiarySystemBackgroundColor},
+        {"selectedControlColor", UIColor.systemBlueColor},
+        {"selectedContentBackgroundColor", UIColor.systemBlueColor},
+        {"unemphasizedSelectedContentBackgroundColor", UIColor.systemGray4Color},
+        {"controlTextColor", UIColor.labelColor},
+        {"textColor", UIColor.labelColor},
+        {"labelColor", UIColor.labelColor},
+        {"headerTextColor", UIColor.labelColor},
+        {"secondaryLabelColor", UIColor.secondaryLabelColor},
+        {"quaternaryLabelColor", UIColor.quaternaryLabelColor},
+        {"disabledControlTextColor", UIColor.tertiaryLabelColor},
+        {"placeholderTextColor", UIColor.placeholderTextColor},
+        {"shadowColor", UIColor.blackColor},
+        {"linkColor", UIColor.linkColor},
+        {"selectedMenuItemTextColor", UIColor.whiteColor},
+        {"alternateSelectedControlTextColor", UIColor.whiteColor},
+        {"unemphasizedSelectedTextColor", UIColor.secondaryLabelColor},
+        {"controlAccentColor", UIColor.systemBlueColor},
+        {"keyboardFocusIndicatorColor", UIColor.systemBlueColor},
+        {"gridColor", UIColor.separatorColor},
+        {"separatorColor", UIColor.separatorColor},
+    };
+
+    Class cls = objc_getClass("NSColor");
+    BOOL created = NO;
+    if (!cls) {
+        cls = objc_allocateClassPair([MSStubObject class], "NSColor", 0);
+        if (!cls) {
+            studpad_log("[shim] no NSColor class and could not create one");
+            return;
+        }
+        objc_registerClassPair(cls);
+        created = YES;
+    }
+
+    NSMutableDictionary *colors = [NSMutableDictionary dictionary];
+    int added = 0;
+    int wrapped = 0;
+    for (size_t i = 0; i < sizeof palette / sizeof palette[0]; i++) {
+        colors[@(palette[i].selector)] = palette[i].color;
+        if (ms_add_class_method(cls, palette[i].selector,
+                                (IMP)ms_nscolor_static_color, "@@:")) {
+            added++;
+        } else {
+            // iOS may already vend these as UIDynamicSystemColor, which lacks AppKit color methods.
+            class_replaceMethod(object_getClass(cls), sel_registerName(palette[i].selector),
+                                (IMP)ms_nscolor_static_color, "@@:");
+            wrapped++;
+        }
+    }
+    gAppKitColors = [colors copy];
+    if (ms_add_class_method(cls, "alternatingContentBackgroundColors",
+                            (IMP)ms_nscolor_alternating_backgrounds, "@@:"))
+        added++;
+
+    int conversions = 0;
+    conversions += ms_add_instance_method(cls, "type", (IMP)ms_nscolor_type, "q@:");
+    conversions += ms_add_instance_method(cls, "className", (IMP)ms_nscolor_class_name, "@@:");
+    conversions += ms_add_instance_method(cls, "catalogNameComponent",
+                                          (IMP)ms_nscolor_catalog_name, "@@:");
+    conversions += ms_add_instance_method(cls, "colorNameComponent",
+                                          (IMP)ms_nscolor_color_name, "@@:");
+    conversions += ms_add_instance_method(cls, "colorSpace", (IMP)ms_nscolor_no_color_space, "@@:");
+    conversions += ms_add_instance_method(cls, "numberOfComponents",
+                                          (IMP)ms_nscolor_component_count, "q@:");
+    conversions += ms_add_instance_method(cls, "colorUsingColorSpace:", (IMP)ms_return_self, "@@:@");
+    conversions += ms_add_instance_method(cls, "colorUsingColorSpaceName:",
+                                          (IMP)ms_return_self, "@@:@");
+    conversions += ms_add_instance_method(cls, "highlightWithLevel:", (IMP)ms_return_self, "@@:d");
+    conversions += ms_add_instance_method(cls, "colorWithAlphaComponent:",
+                                          (IMP)ms_return_self, "@@:d");
+    conversions += ms_add_instance_method(cls, "getRed:green:blue:alpha:",
+                                          (IMP)ms_generic_get_rgba, "B@:^d^d^d^d");
+    conversions += ms_add_instance_method(cls, "getComponents:",
+                                          (IMP)ms_generic_get_components, "v@:^d");
+
+    class_addMethod(object_getClass(cls), sel_registerName("resolveClassMethod:"),
+                    (IMP)ms_nscolor_resolve_class, "B@::");
+    class_addMethod(object_getClass(cls), sel_registerName("resolveInstanceMethod:"),
+                    (IMP)ms_nscolor_resolve_instance, "B@::");
+
+    studpad_log("[shim] NSColor %s: %d palette method(s) added, %d existing palette method(s) wrapped, %d conversion method(s)",
+                created ? "created" : "extended", added, wrapped, conversions);
+}
 
 static void ms_pump(double seconds) {
     NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
@@ -277,6 +783,13 @@ static void ms_pump(double seconds) {
 - (id)trackingArea { return nil; }
 @end
 
+static void ms_log_runtime_class_identity(const char *name) {
+    Class cls = objc_lookUpClass(name);
+    Class metaclass = cls ? object_getClass(cls) : Nil;
+    studpad_log("[objc class] %s class=%p metaclass=%p", name, (__bridge void *)cls,
+                (__bridge void *)metaclass);
+}
+
 @interface NSScreen : MSStubObject
 @end
 
@@ -284,13 +797,27 @@ static void ms_pump(double seconds) {
 + (NSScreen *)mainScreen {
     static NSScreen *screen = nil;
     if (!screen) screen = [NSScreen new];
+
+    // objc_fatal exits without reaching the app's signal handler; map nearby class pointers first.
+    static dispatch_once_t classDiagnosticsOnce;
+    dispatch_once(&classDiagnosticsOnce, ^{
+        studpad_log("[objc class] NSScreen object=%p class=%p", screen,
+                    (__bridge void *)object_getClass(screen));
+        const char *classNames[] = {
+            "MSStubObject", "MSColor", "NSApplication", "NSColor", "NSEvent",
+            "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow",
+            "QNSView", "QNSWindow", "QCocoaScreen", "UIDynamicSystemColor"
+        };
+        for (size_t i = 0; i < sizeof classNames / sizeof classNames[0]; i++)
+            ms_log_runtime_class_identity(classNames[i]);
+    });
     return screen;
 }
 + (NSArray *)screens { return @[ [NSScreen mainScreen] ]; }
 - (CGRect)frame { return UIScreen.mainScreen.bounds; }
 - (CGRect)visibleFrame { return UIScreen.mainScreen.bounds; }
 - (double)backingScaleFactor { return UIScreen.mainScreen.scale; }
-- (id)deviceDescription { return @{}; }
+- (id)deviceDescription { return @{@"NSScreenNumber": @(CGMainDisplayID())}; }
 - (long)depth { return 24; }
 - (CGRect)convertRectToBacking:(CGRect)rect { return rect; }
 @end
@@ -302,7 +829,11 @@ static void ms_pump(double seconds) {
 // NSView is a real UIView, not a model object. Qt's cocoa platform plugin instantiates its own
 // QNSView, which subclasses NSView by name at load time: that makes every Studio window a UIView,
 // so UIKit delivers drawing and touches to Qt's own code paths instead of to a stub.
-@interface NSView : UIView <UIKeyInput>
+@interface NSView : UIView <UIKeyInput> {
+@private
+    CALayer *_msHostedLayer;
+}
+- (void)ms_layoutHostedLayer;
 @end
 
 @implementation NSView
@@ -317,6 +848,9 @@ static void ms_pump(double seconds) {
         pan.minimumNumberOfTouches = 2;
         pan.maximumNumberOfTouches = 2;
         [self addGestureRecognizer:pan];
+        UIHoverGestureRecognizer *hover =
+            [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(ms_hovered:)];
+        [self addGestureRecognizer:hover];
     }
     return self;
 }
@@ -326,6 +860,7 @@ static void ms_pump(double seconds) {
     CGRect frame = self.frame;
     frame.size = size;
     self.frame = frame;
+    [self ms_layoutHostedLayer];
 }
 - (void)setFrameOrigin:(CGPoint)origin {
     CGRect frame = self.frame;
@@ -335,7 +870,10 @@ static void ms_pump(double seconds) {
 - (CGRect)visibleRect { return self.bounds; }
 - (BOOL)isFlipped { return YES; }
 - (void)setFlipped:(BOOL)flipped { (void)flipped; }
-- (void)setBounds:(CGRect)bounds { (void)bounds; }
+- (void)setBounds:(CGRect)bounds {
+    [super setBounds:bounds];
+    [self ms_layoutHostedLayer];
+}
 - (void)setNeedsDisplay:(BOOL)needs {
     if (needs) [self setNeedsDisplay];
 }
@@ -346,7 +884,53 @@ static void ms_pump(double seconds) {
 - (void)displayIfNeeded { }
 - (BOOL)wantsUpdateLayer { return NO; }
 - (void)updateLayer { }
-- (void)setLayer:(id)layer { (void)layer; }
+
+// UIKit owns the UIView's root layer, so an AppKit layer cannot replace it. Keep the layer Qt or
+// Studio supplies as a child instead; this lets a CAMetalLayer reach Core Animation without
+// pretending that the desktop NSOpenGLContext below is implemented.
+- (void)ms_layoutHostedLayer {
+    CALayer *layer = _msHostedLayer;
+    if (!layer) return;
+    CGFloat scale = self.window.screen.scale;
+    if (scale <= 0) scale = UIScreen.mainScreen.scale;
+    layer.frame = self.bounds;
+    layer.contentsScale = scale;
+    if ([layer isKindOfClass:CAMetalLayer.class]) {
+        CAMetalLayer *metal = (CAMetalLayer *)layer;
+        if (CGSizeEqualToSize(metal.drawableSize, CGSizeZero)) {
+            metal.drawableSize = CGSizeMake(self.bounds.size.width * scale,
+                                            self.bounds.size.height * scale);
+        }
+    }
+}
+
+- (void)setLayer:(id)layer {
+    if (layer && ![layer isKindOfClass:CALayer.class]) {
+        studpad_log("[shim] ignored non-CALayer passed to NSView setLayer:");
+        return;
+    }
+    if (layer == self.layer) return;
+
+    void (^install)(void) = ^{
+        CALayer *next = (CALayer *)layer;
+        if (self->_msHostedLayer == next) return;
+        [self->_msHostedLayer removeFromSuperlayer];
+        self->_msHostedLayer = next;
+        if (next) {
+            [self.layer addSublayer:next];
+            [self ms_layoutHostedLayer];
+            studpad_log("[shim] hosted AppKit layer %s in UIKit view",
+                        NSStringFromClass(next.class).UTF8String);
+        }
+    };
+    if (NSThread.isMainThread) install();
+    else dispatch_async(dispatch_get_main_queue(), install);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self ms_layoutHostedLayer];
+}
 - (void)setWantsLayer:(BOOL)wants { (void)wants; }
 - (BOOL)wantsLayer { return YES; }
 - (void)setLayerContentsRedrawPolicy:(long)policy { (void)policy; }
@@ -389,6 +973,7 @@ static void ms_pump(double seconds) {
 
 // AppKit's mouse/keyboard vocabulary. QNSView overrides these, so a touch ends up in Qt.
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
 - (BOOL)becomeFirstResponder { return [super becomeFirstResponder]; }
 - (BOOL)resignFirstResponder { return [super resignFirstResponder]; }
@@ -413,17 +998,19 @@ static void ms_pump(double seconds) {
 
 // A touch becomes the NSEvent Qt expects. Coordinates are top-left (isFlipped YES), which is what
 // QNSView assumes after convertPoint:fromView:nil.
-- (void)ms_send:(UITouch *)touch type:(long)type {
+- (void)ms_send:(UITouch *)touch phase:(int)phase {
+    long type = studpad_mouse_event_for_touch_phase(phase);
+    if (type < 0) return;
     CGPoint point = [touch locationInView:self];
     NSEvent *event = [NSEvent ms_make:type location:point window:self.window];
     event->_msButtonNumber = 0;
     event->_msClickCount = (long)touch.tapCount;
     event->_msPressure = (float)touch.force;
     switch (type) {
-        case 1: [self mouseDown:event]; break;
-        case 2: [self mouseUp:event]; break;
-        case 6: [self mouseDragged:event]; break;
-        case 5: [self mouseMoved:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DOWN: [self mouseDown:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_UP: [self mouseUp:event]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DRAGGED: [self mouseDragged:event]; break;
+        case STUDPAD_EVENT_MOUSE_MOVED: [self mouseMoved:event]; break;
         default: break;
     }
 }
@@ -433,26 +1020,37 @@ static void ms_pump(double seconds) {
     [self becomeFirstResponder];
     for (UITouch *touch in touches) {
         // A tap on an empty part of the window is how the input focus moves in a desktop app.
-        [self ms_send:touch type:1];
+        [self ms_send:touch phase:STUDPAD_TOUCH_BEGAN];
     }
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:6];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_MOVED];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:2];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_ENDED];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *touch in touches) [self ms_send:touch type:2];
+    for (UITouch *touch in touches) [self ms_send:touch phase:STUDPAD_TOUCH_CANCELLED];
+}
+
+- (void)ms_hovered:(UIHoverGestureRecognizer *)hover {
+    if (hover.state != UIGestureRecognizerStateBegan &&
+        hover.state != UIGestureRecognizerStateChanged) return;
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_MOUSE_MOVED
+                             location:[hover locationInView:self]
+                               window:self.window];
+    [self mouseMoved:event];
 }
 
 - (void)ms_panned:(UIPanGestureRecognizer *)pan {
     CGPoint delta = [pan translationInView:self];
     [pan setTranslation:CGPointZero inView:self];
-    NSEvent *event = [NSEvent ms_make:22 location:[pan locationInView:self] window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_SCROLL_WHEEL
+                             location:[pan locationInView:self]
+                               window:self.window];
     event->_msScrollingDeltaX = -delta.x;
     event->_msScrollingDeltaY = -delta.y;
     event->_msDeltaX = -delta.x;
@@ -460,49 +1058,21 @@ static void ms_pump(double seconds) {
     [self scrollWheel:event];
 }
 
-// Hardware-keyboard input. UIKey gives the HID usage, macOS wants a virtual keycode; the table is
-// US layout, which is the only one the shim claims to support.
-static unsigned short ms_mac_keycode(unsigned short hid) {
-    switch (hid) {
-        case 0x04: return 0;   case 0x05: return 11;  case 0x06: return 8;   case 0x07: return 2;
-        case 0x08: return 14;  case 0x09: return 3;   case 0x0A: return 5;   case 0x0B: return 4;
-        case 0x0C: return 34;  case 0x0D: return 38;  case 0x0E: return 40;  case 0x0F: return 37;
-        case 0x10: return 46;  case 0x11: return 45;  case 0x12: return 31;  case 0x13: return 35;
-        case 0x14: return 12;  case 0x15: return 15;  case 0x16: return 1;   case 0x17: return 17;
-        case 0x18: return 32;  case 0x19: return 9;   case 0x1A: return 13;  case 0x1B: return 7;
-        case 0x1C: return 16;  case 0x1D: return 6;
-        case 0x1E: return 18;  case 0x1F: return 19;  case 0x20: return 20;  case 0x21: return 21;
-        case 0x22: return 23;  case 0x23: return 22;  case 0x24: return 26;  case 0x25: return 28;
-        case 0x26: return 25;  case 0x27: return 29;
-        case 0x28: return 36;  case 0x29: return 53;  case 0x2A: return 51;  case 0x2B: return 48;
-        case 0x2C: return 49;  case 0x2D: return 27;  case 0x2E: return 24;  case 0x2F: return 33;
-        case 0x30: return 30;  case 0x31: return 42;  case 0x33: return 41;  case 0x34: return 39;
-        case 0x35: return 50;  case 0x36: return 43;  case 0x37: return 47;  case 0x38: return 44;
-        case 0x3A: return 122; case 0x3B: return 120; case 0x3C: return 99;  case 0x3D: return 118;
-        case 0x3E: return 96;  case 0x3F: return 97;  case 0x40: return 98;  case 0x41: return 100;
-        case 0x42: return 101; case 0x43: return 109; case 0x44: return 103; case 0x45: return 111;
-        case 0x49: return 115; case 0x4A: return 116; case 0x4B: return 119; case 0x4C: return 117;
-        case 0x4D: return 121; case 0x4E: return 92;  case 0x4F: return 124; case 0x50: return 123;
-        case 0x51: return 125; case 0x52: return 126;
-        case 0xE0: return 59;  case 0xE1: return 56;  case 0xE2: return 58;  case 0xE3: return 55;
-        case 0xE4: return 62;  case 0xE5: return 60;  case 0xE6: return 61;  case 0xE7: return 54;
-        default: return 0xFFFF;
-    }
-}
-
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
     (void)event;
     for (UIPress *press in presses) {
         UIKey *key = press.key;
         if (!key) continue;
-        unsigned short code = ms_mac_keycode(key.keyCode);
+        unsigned short code = studpad_mac_keycode_for_hid(key.keyCode);
         if (code == 0xFFFF) continue;
-        NSEvent *nsEvent = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+        long type = studpad_key_event_for_hid(key.keyCode, 1);
+        NSEvent *nsEvent = [NSEvent ms_make:type location:self.bounds.origin window:self.window];
         nsEvent->_msKeyCode = code;
         nsEvent->_msFlags = key.modifierFlags;
         nsEvent->_msCharacters = [key.characters copy];
-        // QNSView handles the text path from keyDown: itself (it is the NSTextInputClient).
-        if ([key.characters length]) [self keyDown:nsEvent];
+        // Modifier transitions carry no characters. QNSView uses flagsChanged: to update shortcuts.
+        if (studpad_hid_usage_is_modifier(key.keyCode)) [self flagsChanged:nsEvent];
+        else [self keyDown:nsEvent];
     }
 }
 
@@ -511,25 +1081,27 @@ static unsigned short ms_mac_keycode(unsigned short hid) {
     for (UIPress *press in presses) {
         UIKey *key = press.key;
         if (!key) continue;
-        unsigned short code = ms_mac_keycode(key.keyCode);
+        unsigned short code = studpad_mac_keycode_for_hid(key.keyCode);
         if (code == 0xFFFF) continue;
-        NSEvent *nsEvent = [NSEvent ms_make:11 location:self.bounds.origin window:self.window];
+        long type = studpad_key_event_for_hid(key.keyCode, 0);
+        NSEvent *nsEvent = [NSEvent ms_make:type location:self.bounds.origin window:self.window];
         nsEvent->_msKeyCode = code;
         nsEvent->_msFlags = key.modifierFlags;
         nsEvent->_msCharacters = [key.characters copy];
-        [self keyUp:nsEvent];
+        if (studpad_hid_usage_is_modifier(key.keyCode)) [self flagsChanged:nsEvent];
+        else [self keyUp:nsEvent];
     }
 }
 
 - (BOOL)hasText { return YES; }
 - (void)insertText:(NSString *)text {
     if (![text length]) return;
-    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_KEY_DOWN location:self.bounds.origin window:self.window];
     event->_msCharacters = [text copy];
     [self keyDown:event];
 }
 - (void)deleteBackward {
-    NSEvent *event = [NSEvent ms_make:10 location:self.bounds.origin window:self.window];
+    NSEvent *event = [NSEvent ms_make:STUDPAD_EVENT_KEY_DOWN location:self.bounds.origin window:self.window];
     event->_msKeyCode = 51;
     unichar del = 0x7f;
     event->_msCharacters = [NSString stringWithCharacters:&del length:1];
@@ -634,6 +1206,7 @@ static UIWindowScene *ms_active_scene(void) {
 - (double)backingScaleFactor { return (double)UIScreen.mainScreen.scale; }
 - (void)setDelegate:(id)delegate { _msDelegate = delegate; }
 - (id)delegate { return _msDelegate; }
+
 - (void)makeFirstResponder:(id)responder { [responder becomeFirstResponder]; }
 - (id)firstResponder { return nil; }
 - (void)invalidateShadow { }
@@ -664,12 +1237,14 @@ static UIWindowScene *ms_active_scene(void) {
     // UIView, so go through id.
     id target = (id)(hit ? hit : _msContentView);
     switch ([nsEvent type]) {
-        case 1: [target mouseDown:nsEvent]; break;
-        case 2: [target mouseUp:nsEvent]; break;
-        case 6: [target mouseDragged:nsEvent]; break;
-        case 22: [target scrollWheel:nsEvent]; break;
-        case 10: [target keyDown:nsEvent]; break;
-        case 11: [target keyUp:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DOWN: [target mouseDown:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_UP: [target mouseUp:nsEvent]; break;
+        case STUDPAD_EVENT_MOUSE_MOVED: [target mouseMoved:nsEvent]; break;
+        case STUDPAD_EVENT_LEFT_MOUSE_DRAGGED: [target mouseDragged:nsEvent]; break;
+        case STUDPAD_EVENT_SCROLL_WHEEL: [target scrollWheel:nsEvent]; break;
+        case STUDPAD_EVENT_KEY_DOWN: [target keyDown:nsEvent]; break;
+        case STUDPAD_EVENT_KEY_UP: [target keyUp:nsEvent]; break;
+        case STUDPAD_EVENT_FLAGS_CHANGED: [target flagsChanged:nsEvent]; break;
         default: [target mouseDown:nsEvent]; break;
     }
 }
@@ -678,16 +1253,33 @@ static UIWindowScene *ms_active_scene(void) {
 @interface NSApplication : MSStubObject {
     id _msDelegate;
     id _msMainMenu;
+    id _msEffectiveAppearance;
     BOOL _msShouldTerminate;
     BOOL _msActive;
     BOOL _msFinishedLaunching;
 }
+- (NSWindow *)modalWindow;
 - (id)ms_lastWindow;
 @end
 
-
+// AppKit's NSApp is a variable, not a function: the guest loads the pointer out of it. Anything
+// else here — a stub generated as a function — puts code bytes where Studio reads an object
+// pointer, which is how build 59 ended up sending addObserver: to a tagged pointer string.
+NSApplication *NSApp = nil;
 
 @implementation NSApplication
+
++ (void)load {
+    NSApp = [NSApplication sharedApplication];
+}
+
+// Core Data asks class objects whether a selector should be eagerly registered.
+// NSApplication has no Core Data generated accessors, so answer with the private
+// hook's actual BOOL/const-char-pointer ABI instead of the void miss fallback.
++ (BOOL)_classShouldAlwaysRegisterSelectorNamed:(const char *)name {
+    (void)name;
+    return NO;
+}
 
 - (id)ms_lastWindow {
     @synchronized(gWindows) {
@@ -706,6 +1298,19 @@ static UIWindowScene *ms_active_scene(void) {
 
 - (void)setDelegate:(id)delegate { _msDelegate = delegate; }
 - (id)delegate { return _msDelegate; }
+
+// Qt's Cocoa theme observes this AppKit property. Keep its value on the shim object rather than
+// sending repeated unsupported setter calls through MSStubObject's generic forwarding path.
+- (void)setEffectiveAppearance:(id)appearance {
+    if (_msEffectiveAppearance == appearance) return;
+    _msEffectiveAppearance = appearance;
+}
+- (id)effectiveAppearance {
+    if (_msEffectiveAppearance) return _msEffectiveAppearance;
+    Class appearanceClass = NSClassFromString(@"NSAppearance");
+    _msEffectiveAppearance = appearanceClass ? [[appearanceClass alloc] init] : nil;
+    return _msEffectiveAppearance;
+}
 
 - (void)finishLaunching {
     if (_msFinishedLaunching) return;
@@ -753,6 +1358,9 @@ static UIWindowScene *ms_active_scene(void) {
 - (BOOL)isRunning { return YES; }
 - (void)setActivationPolicy:(long)policy { (void)policy; }
 - (long)activationPolicy { return 0; }
+// NSApplication inherits NSResponder's menu property; for NSApplication it aliases mainMenu.
+- (void)setMenu:(id)menu { _msMainMenu = menu; }
+- (id)menu { return _msMainMenu; }
 - (void)setMainMenu:(id)menu { _msMainMenu = menu; }
 - (id)mainMenu { return _msMainMenu; }
 - (void)setServicesMenu:(id)menu { (void)menu; }
@@ -761,6 +1369,9 @@ static UIWindowScene *ms_active_scene(void) {
         return gWindows.count ? [gWindows copy] : @[];
     }
 }
+// AppKit reports no active modal window until a modal session is entered. The shim does
+// not run modal sessions yet, so nil is the correct value during Studio's launch checks.
+- (NSWindow *)modalWindow { return nil; }
 - (id)keyWindow { return [self ms_lastWindow]; }
 - (id)mainWindow { return [self ms_lastWindow]; }
 - (id)windowWithWindowNumber:(long)number {
@@ -798,6 +1409,131 @@ NSString *const NSModalPanelRunLoopMode = @"NSModalPanelRunLoopMode";
 NSString *const NSApplicationDidFinishLaunchingNotification =
     @"NSApplicationDidFinishLaunchingNotification";
 
+// The rest of AppKit's globals that Studio and Qt's cocoa plugin bind. Each is a pointer variable
+// the guest loads, so each has to be real data here: plan_shim would otherwise generate a function
+// for the name, and the guest would read that function's machine code as a pointer. They are only
+// ever compared or handed back to AppKit, so their value only has to be unique and non-nil.
+NSString *const NSAccessibilityApplicationRole = @"NSAccessibilityApplicationRole";
+NSString *const NSAccessibilityAttributedStringForRangeParameterizedAttribute =
+    @"NSAccessibilityAttributedStringForRangeParameterizedAttribute";
+NSString *const NSAccessibilityBoundsForRangeParameterizedAttribute =
+    @"NSAccessibilityBoundsForRangeParameterizedAttribute";
+NSString *const NSAccessibilityButtonRole = @"NSAccessibilityButtonRole";
+NSString *const NSAccessibilityCheckBoxRole = @"NSAccessibilityCheckBoxRole";
+NSString *const NSAccessibilityChildrenAttribute = @"NSAccessibilityChildrenAttribute";
+NSString *const NSAccessibilityColorWellRole = @"NSAccessibilityColorWellRole";
+NSString *const NSAccessibilityColumnRole = @"NSAccessibilityColumnRole";
+NSString *const NSAccessibilityComboBoxRole = @"NSAccessibilityComboBoxRole";
+NSString *const NSAccessibilityDecrementAction = @"NSAccessibilityDecrementAction";
+NSString *const NSAccessibilityFocusedAttribute = @"NSAccessibilityFocusedAttribute";
+NSString *const NSAccessibilityFocusedUIElementChangedNotification =
+    @"NSAccessibilityFocusedUIElementChangedNotification";
+NSString *const NSAccessibilityGroupRole = @"NSAccessibilityGroupRole";
+NSString *const NSAccessibilityGrowAreaRole = @"NSAccessibilityGrowAreaRole";
+NSString *const NSAccessibilityImageRole = @"NSAccessibilityImageRole";
+NSString *const NSAccessibilityIncrementAction = @"NSAccessibilityIncrementAction";
+NSString *const NSAccessibilityIncrementorRole = @"NSAccessibilityIncrementorRole";
+NSString *const NSAccessibilityLineForIndexParameterizedAttribute =
+    @"NSAccessibilityLineForIndexParameterizedAttribute";
+NSString *const NSAccessibilityLinkRole = @"NSAccessibilityLinkRole";
+NSString *const NSAccessibilityListRole = @"NSAccessibilityListRole";
+NSString *const NSAccessibilityMenuBarRole = @"NSAccessibilityMenuBarRole";
+NSString *const NSAccessibilityMenuButtonRole = @"NSAccessibilityMenuButtonRole";
+NSString *const NSAccessibilityMenuItemRole = @"NSAccessibilityMenuItemRole";
+NSString *const NSAccessibilityMenuRole = @"NSAccessibilityMenuRole";
+NSString *const NSAccessibilityPopUpButtonRole = @"NSAccessibilityPopUpButtonRole";
+NSString *const NSAccessibilityPressAction = @"NSAccessibilityPressAction";
+NSString *const NSAccessibilityProgressIndicatorRole = @"NSAccessibilityProgressIndicatorRole";
+NSString *const NSAccessibilityRadioButtonRole = @"NSAccessibilityRadioButtonRole";
+NSString *const NSAccessibilityRaiseAction = @"NSAccessibilityRaiseAction";
+NSString *const NSAccessibilityRangeForLineParameterizedAttribute =
+    @"NSAccessibilityRangeForLineParameterizedAttribute";
+NSString *const NSAccessibilityRangeForPositionParameterizedAttribute =
+    @"NSAccessibilityRangeForPositionParameterizedAttribute";
+NSString *const NSAccessibilityRoleDescription = @"NSAccessibilityRoleDescription";
+NSString *const NSAccessibilityRowRole = @"NSAccessibilityRowRole";
+NSString *const NSAccessibilityScrollBarRole = @"NSAccessibilityScrollBarRole";
+NSString *const NSAccessibilitySearchFieldSubrole = @"NSAccessibilitySearchFieldSubrole";
+NSString *const NSAccessibilitySecureTextFieldSubrole = @"NSAccessibilitySecureTextFieldSubrole";
+NSString *const NSAccessibilitySelectedTextChangedNotification =
+    @"NSAccessibilitySelectedTextChangedNotification";
+NSString *const NSAccessibilitySelectedTextRangeAttribute =
+    @"NSAccessibilitySelectedTextRangeAttribute";
+NSString *const NSAccessibilityShowMenuAction = @"NSAccessibilityShowMenuAction";
+NSString *const NSAccessibilitySliderRole = @"NSAccessibilitySliderRole";
+NSString *const NSAccessibilitySplitGroupRole = @"NSAccessibilitySplitGroupRole";
+NSString *const NSAccessibilitySplitterRole = @"NSAccessibilitySplitterRole";
+NSString *const NSAccessibilityStaticTextRole = @"NSAccessibilityStaticTextRole";
+NSString *const NSAccessibilityStringForRangeParameterizedAttribute =
+    @"NSAccessibilityStringForRangeParameterizedAttribute";
+NSString *const NSAccessibilityStyleRangeForIndexParameterizedAttribute =
+    @"NSAccessibilityStyleRangeForIndexParameterizedAttribute";
+NSString *const NSAccessibilityTableRole = @"NSAccessibilityTableRole";
+NSString *const NSAccessibilityTextAreaRole = @"NSAccessibilityTextAreaRole";
+NSString *const NSAccessibilityTextFieldRole = @"NSAccessibilityTextFieldRole";
+NSString *const NSAccessibilityTitleChangedNotification = @"NSAccessibilityTitleChangedNotification";
+NSString *const NSAccessibilityToolbarRole = @"NSAccessibilityToolbarRole";
+NSString *const NSAccessibilityUIElementDestroyedNotification =
+    @"NSAccessibilityUIElementDestroyedNotification";
+NSString *const NSAccessibilityUnignoredAncestor = @"NSAccessibilityUnignoredAncestor";
+NSString *const NSAccessibilityUnignoredChildren = @"NSAccessibilityUnignoredChildren";
+NSString *const NSAccessibilityUnignoredChildrenForOnlyChild =
+    @"NSAccessibilityUnignoredChildrenForOnlyChild";
+NSString *const NSAccessibilityUnknownRole = @"NSAccessibilityUnknownRole";
+NSString *const NSAccessibilityValueAttribute = @"NSAccessibilityValueAttribute";
+NSString *const NSAccessibilityValueChangedNotification = @"NSAccessibilityValueChangedNotification";
+NSString *const NSAccessibilityValueIndicatorRole = @"NSAccessibilityValueIndicatorRole";
+NSString *const NSAccessibilityWindowRole = @"NSAccessibilityWindowRole";
+NSString *const NSApplicationDidChangeScreenParametersNotification =
+    @"NSApplicationDidChangeScreenParametersNotification";
+NSString *const NSApplicationWillBecomeActiveNotification =
+    @"NSApplicationWillBecomeActiveNotification";
+NSString *const NSApplicationWillResignActiveNotification =
+    @"NSApplicationWillResignActiveNotification";
+NSString *const NSColorPanelColorDidChangeNotification = @"NSColorPanelColorDidChangeNotification";
+NSString *const NSColorPboardType = @"NSColorPboardType";
+NSString *const NSFileContentsPboardType = @"NSFileContentsPboardType";
+NSString *const NSFilenamesPboardType = @"NSFilenamesPboardType";
+NSString *const NSFilesPromisePboardType = @"NSFilesPromisePboardType";
+NSString *const NSFontPboardType = @"NSFontPboardType";
+NSString *const NSHTMLPboardType = @"NSHTMLPboardType";
+NSString *const NSImageNameApplicationIcon = @"NSImageNameApplicationIcon";
+NSString *const NSInkTextPboardType = @"NSInkTextPboardType";
+NSString *const NSMultipleTextSelectionPboardType = @"NSMultipleTextSelectionPboardType";
+NSString *const NSPDFPboardType = @"NSPDFPboardType";
+NSString *const NSPostScriptPboardType = @"NSPostScriptPboardType";
+NSString *const NSPreferredScrollerStyleDidChangeNotification =
+    @"NSPreferredScrollerStyleDidChangeNotification";
+NSString *const NSRTFDPboardType = @"NSRTFDPboardType";
+NSString *const NSRTFPboardType = @"NSRTFPboardType";
+NSString *const NSRulerPboardType = @"NSRulerPboardType";
+NSString *const NSStringPboardType = @"NSStringPboardType";
+NSString *const NSSystemColorsDidChangeNotification = @"NSSystemColorsDidChangeNotification";
+NSString *const NSTIFFPboardType = @"NSTIFFPboardType";
+NSString *const NSTabularTextPboardType = @"NSTabularTextPboardType";
+NSString *const NSTextInputContextKeyboardSelectionDidChangeNotification =
+    @"NSTextInputContextKeyboardSelectionDidChangeNotification";
+NSString *const NSURLPboardType = @"NSURLPboardType";
+NSString *const NSVCardPboardType = @"NSVCardPboardType";
+NSString *const NSWindowDidChangeBackingPropertiesNotification =
+    @"NSWindowDidChangeBackingPropertiesNotification";
+NSString *const NSWindowDidChangeScreenNotification = @"NSWindowDidChangeScreenNotification";
+NSString *const NSWindowDidEndLiveResizeNotification = @"NSWindowDidEndLiveResizeNotification";
+NSString *const NSWindowDidEnterFullScreenNotification = @"NSWindowDidEnterFullScreenNotification";
+NSString *const NSWindowDidExitFullScreenNotification = @"NSWindowDidExitFullScreenNotification";
+NSString *const NSWindowDidResizeNotification = @"NSWindowDidResizeNotification";
+NSString *const NSWindowDidUpdateNotification = @"NSWindowDidUpdateNotification";
+NSString *const NSWindowWillCloseNotification = @"NSWindowWillCloseNotification";
+NSString *const NSWindowWillStartLiveResizeNotification = @"NSWindowWillStartLiveResizeNotification";
+NSString *const NSWorkspaceDidWakeNotification = @"NSWorkspaceDidWakeNotification";
+NSString *const NSWorkspaceScreensDidSleepNotification = @"NSWorkspaceScreensDidSleepNotification";
+NSString *const NSWorkspaceScreensDidWakeNotification = @"NSWorkspaceScreensDidWakeNotification";
+NSString *const NSWorkspaceWillSleepNotification = @"NSWorkspaceWillSleepNotification";
+
+// AppKit reports its version as a double. Qt and Studio use it to pick macOS-era code paths; iOS 26
+// is far newer than Studio's deployment target, so answer macOS 11.
+double NSAppKitVersionNumber = 1811.0;
+
 void NSBeep(void) { AudioServicesPlaySystemSound(1104); }
 void NSApplicationLoad(void) { }
 void NSRectFill(CGRect rect) { (void)rect; }
@@ -813,10 +1549,21 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
     id _msTarget;
     id _msSubmenu;
     SEL _msAction;
+    BOOL _msSeparatorItem;
 }
 @end
 
 @implementation NSMenuItem
++ (instancetype)separatorItem {
+    // AppKit's factory must return a real item; the generic missing-selector fallback returns nil.
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        studpad_log("[shim] NSMenuItem separator factory active");
+    });
+    NSMenuItem *item = [[self alloc] initWithTitle:@"" action:NULL keyEquivalent:@""];
+    item->_msSeparatorItem = YES;
+    return item;
+}
 - (id)initWithTitle:(id)title action:(SEL)action keyEquivalent:(id)key {
     if ((self = [super init])) {
         _msTitle = [title copy];
@@ -827,6 +1574,7 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
 }
 - (id)title { return _msTitle; }
 - (void)setTitle:(id)title { _msTitle = [title copy]; }
+- (BOOL)isSeparatorItem { return _msSeparatorItem; }
 - (SEL)action { return _msAction; }
 - (void)setAction:(SEL)action { _msAction = action; }
 - (id)keyEquivalent { return _msKey ? _msKey : @""; }
@@ -966,10 +1714,20 @@ void NSRectFillList(const CGRect *rects, long count) { (void)rects; (void)count;
 
 static __weak UIView *gHostView = nil;
 static __weak UIActivityIndicatorView *gSpinner = nil;
+static __weak UIView *gLogOverlay = nil;
+static __weak UIButton *gLogButton = nil;
 
 void studpad_host_ready(void *host_view, void *spinner) {
     gHostView = (__bridge UIView *)host_view;
     gSpinner = (__bridge UIActivityIndicatorView *)spinner;
+}
+
+void studpad_set_log_overlay(void *view) {
+    gLogOverlay = (__bridge UIView *)view;
+}
+
+void studpad_set_log_button(void *view) {
+    gLogButton = (__bridge UIButton *)view;
 }
 
 void studpad_present_view(void *view) {
@@ -986,7 +1744,11 @@ void studpad_present_view(void *view) {
             UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         content.backgroundColor = UIColor.blackColor;
         [host addSubview:content];
-        [gSpinner startAnimating];
+        gLogOverlay.hidden = YES;
+        [gSpinner stopAnimating];
+        gSpinner.hidden = YES;
+        gLogButton.hidden = NO;
+        [gLogButton setTitle:@"Logs" forState:UIControlStateNormal];
         studpad_log("[shim] presented Studio's content view in the host window");
     });
 }
@@ -1014,6 +1776,7 @@ static const struct mach_header_64 *find_guest(uint32_t first) {
 }
 
 static int gStarted = 0;
+static char *gStudioLaunchPath = NULL;
 
 // JIT and memory are the two things a sideloaded desktop app is most likely to be stopped by, so
 // they are measured and logged rather than guessed at. Neither changes how Studio loads:
@@ -1021,8 +1784,8 @@ static int gStarted = 0;
 //   * StikDebug (with get-task-allow) attaches a debugger and makes Win/Exec memory available; this
 //     build asks for get-task-allow in app/entitlements-sideload.plist. Studio's static imports show
 //     no JIT API use, so JIT is only needed if the RWX probe below fails and the app later faults.
-//   * GetMoreRam adds increased-memory-limit to the App ID; os_proc_available_memory() shows whether
-//     the installed profile actually has it.
+//   * GetMoreRam can add increased-memory-limit to the App ID. iOS does not expose that installed
+//     per-app limit here, so os_proc_available_memory() is logged only as a current headroom sample.
 static int ms_debugger_attached(void) {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
     struct kinfo_proc info;
@@ -1032,18 +1795,358 @@ static int ms_debugger_attached(void) {
     return (info.kp_proc.p_flag & P_TRACED) ? 1 : 0;
 }
 
+// Studio's allocator is part of its ABI, not an optimisation. Its executable links
+// libmimalloc.3.dylib, whose __DATA,__interpose table turns malloc/free into mi_malloc/mi_free, and
+// StudioKit calls mi_* directly as well; on macOS that is one heap. dyld only reads __interpose from
+// images loaded at launch (RuntimeState::buildInterposingTables walks the launch images), so a
+// mimalloc that is dlopen'd here registers nothing: StudioKit then allocates on mimalloc while Qt
+// allocates and frees on libsystem_malloc, and the first free across the two heaps aborts inside
+// libsystem_malloc — during StudioKit's own dyld initialisers, inside QKeySequence's destructor.
+// studio/build.sh therefore links the dylib into the host executable, which makes it a launch image.
+//
+// This probe is the measurement, not a guess: it asks mimalloc whether a plain malloc() block lands
+// in its heap, which is what decides whether the guest's images share one allocator.
+static void ms_log_allocator(void) {
+    void *miMalloc = dlsym(RTLD_DEFAULT, "mi_malloc");
+    void *miFree = dlsym(RTLD_DEFAULT, "mi_free");
+    if (!miMalloc || !miFree) {
+        studpad_log("allocator: mimalloc is not loaded; StudioKit's mi_* imports cannot resolve");
+        return;
+    }
+    Dl_info info;
+    memset(&info, 0, sizeof info);
+    const char *path = (dladdr(miMalloc, &info) && info.dli_fname) ? info.dli_fname : "?";
+    int (*version)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "mi_version");
+    if (version) {
+        int v = version();
+        studpad_log("allocator: mimalloc %d.%d.%d at %s", v / 100, (v / 10) % 10, v % 10, path);
+    } else {
+        studpad_log("allocator: mimalloc at %s", path);
+    }
+
+    int (*owns)(const void *) = (int (*)(const void *))dlsym(RTLD_DEFAULT, "mi_is_in_heap_region");
+    if (!owns) {
+        studpad_log("allocator: mi_is_in_heap_region missing; cannot tell which heap malloc() uses");
+        return;
+    }
+    // An address comparison against mi_malloc can read an unresolved lazy-bind slot, so hand out a
+    // block and let mimalloc say whether it owns it.
+    void *volatile block = malloc(64);
+    int mine = block && owns(block);
+    free((void *)block);
+    studpad_log("allocator: malloc(64) -> %s heap (%p), free -> %s",
+                mine ? "mimalloc" : "libsystem_malloc", block,
+                mine ? "mi_free" : "libsystem free");
+    if (!mine) {
+        studpad_log("allocator: MIXED heaps: StudioKit's mi_* calls and Qt's malloc/free use different "
+                    "allocators, so whichever heap frees the other's pointer aborts");
+        studpad_log("allocator: libmimalloc has to be a load command of the host (studio/build.sh "
+                    "links it) and AMFI has to allow interposing for this sideloaded signature");
+    }
+}
+
+// Studio resolves `~` from the passwd entry, not from NSHomeDirectory: StudioKit imports getpwuid
+// and getpwuid_r, QtCore getpwuid_r and QtWidgets getpwnam_r. iOS pins uid 501's pw_dir to
+// /var/mobile, so the guest's settings root becomes /var/mobile/Library/Roblox, the sandbox refuses
+// that mkdir, and Studio aborts before its first window ("boost::filesystem::create_directories:
+// Operation not permitted").
+//
+// A sandboxed app owns its container, but the container root is not the right place for a guest's
+// home: iOS may refuse some of the Library paths Studio creates there, and a fixed probe name can
+// be left behind by a previous launch. Create a dedicated home under Application Support instead,
+// with every parent directory, then prove it is writable with a unique mkstemp name. HOME,
+// CFFIXED_USER_HOME and the current user's passwd entry all report that same directory, so Qt and
+// Studio cannot disagree about where `~` is.
+//
+// The interception is a __DATA,__interpose table, which dyld only reads from images loaded at
+// launch. libMacShim.dylib is one (the host links it), the same reason libmimalloc.3.dylib has to
+// be.
+//
+// The real entry points cannot come from dlsym(RTLD_NEXT): libsystem_c is an earlier launch image
+// than this dylib, so RTLD_NEXT would start its search past it. The image dyld actually mapped is
+// dlopen'd by path instead, and the synthesised entry below covers the case where even that fails.
+static char gGuestHome[PATH_MAX];
+static char gGuestName[64];
+static char gSynthPasswdBuffer[PATH_MAX + 256];
+static struct passwd gSynthPasswd;
+static studpad_guest_home_status gGuestHomeStatus = STUDPAD_GUEST_HOME_INVALID;
+static int gGuestHomeErrno;
+static struct passwd *(*gRealGetpwuid)(uid_t);
+static int (*gRealGetpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
+static struct passwd *(*gRealGetpwnam)(const char *);
+static int (*gRealGetpwnam_r)(const char *, struct passwd *, char *, size_t, struct passwd **);
+// Interposition is process wide, so a real call that comes back through these wrappers must not
+// recurse: the synthesised entry serves that case.
+static __thread int tInsidePasswd;
+static __thread int tFindingHome;
+
+static BOOL ms_try_guest_home(NSString *base, NSString *component, const char *source) {
+    if (base.length == 0) return NO;
+    int error = 0;
+    gGuestHomeStatus = studpad_prepare_guest_home(
+        base.fileSystemRepresentation, component.fileSystemRepresentation, gGuestHome,
+        sizeof gGuestHome, &error);
+    gGuestHomeErrno = error;
+    if (gGuestHomeStatus != STUDPAD_GUEST_HOME_OK) {
+        studpad_log("guest home: %s (%s) failed: %s (errno %d)", base.fileSystemRepresentation,
+                    source, studpad_guest_home_status_name(gGuestHomeStatus), error);
+        gGuestHome[0] = '\0';
+        return NO;
+    }
+    if (setenv("HOME", gGuestHome, 1) != 0 || setenv("CFFIXED_USER_HOME", gGuestHome, 1) != 0)
+        studpad_log("guest home: prepared %s but could not pin HOME/CFFIXED_USER_HOME (errno %d)",
+                    gGuestHome, errno);
+    studpad_log("guest home: using %s (%s; write probe passed)", gGuestHome, source);
+    return YES;
+}
+
+static const char *ms_guest_home(void) {
+    if (!gGuestHome[0] && !tFindingHome) {
+        tFindingHome = 1;
+        // Application Support is the documented writable location, and it may not exist yet on a
+        // fresh container, so the helper creates it and every parent.
+        NSString *base = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                             NSUserDomainMask, YES).firstObject;
+        BOOL ready = ms_try_guest_home(base, @"StudPadStudio", "application support");
+        if (!ready) {
+            base = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+            ready = ms_try_guest_home(base, @"Application Support/StudPadStudio", "Library fallback");
+        }
+        if (!ready) {
+            // Last resort: the container root is still writable in the sandbox, and the
+            // create/probe below decides whether it really is. Never redirect to "" or "/".
+            base = NSHomeDirectory();
+            if (base.length > 1)
+                ready = ms_try_guest_home(base, @"StudPadStudio", "container fallback");
+        }
+        if (!ready)
+            studpad_log("guest home: no writable directory; leaving HOME and passwd unchanged. "
+                        "Studio's own ~/Library mkdir will probably be denied");
+        tFindingHome = 0;
+    }
+    return gGuestHome[0] ? gGuestHome : NULL;
+}
+
+static const char *ms_guest_name(void) {
+    if (!gGuestName[0]) {
+        const char *name = getenv("USER");
+        snprintf(gGuestName, sizeof gGuestName, "%s", (name && *name) ? name : "mobile");
+    }
+    return gGuestName;
+}
+
+static void *ms_libsystem_c(void) {
+    static void *handle;
+    static int looked;
+    if (looked) return handle;
+    looked = 1;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count && !handle; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        if (!strstr(name, "libsystem_c.dylib") && !strstr(name, "libSystem.B.dylib")) continue;
+        handle = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+    }
+    return handle;
+}
+
+static void *ms_passwd_symbol(const char *name) {
+    void *symbol = dlsym(RTLD_NEXT, name);
+    if (symbol) return symbol;
+    void *handle = ms_libsystem_c();
+    return handle ? dlsym(handle, name) : NULL;
+}
+
+static void ms_resolve_passwd(void) {
+    if (!gRealGetpwuid) gRealGetpwuid = (struct passwd *(*)(uid_t))ms_passwd_symbol("getpwuid");
+    if (!gRealGetpwuid_r)
+        gRealGetpwuid_r = (int (*)(uid_t, struct passwd *, char *, size_t, struct passwd **))
+            ms_passwd_symbol("getpwuid_r");
+    if (!gRealGetpwnam) gRealGetpwnam = (struct passwd *(*)(const char *))ms_passwd_symbol("getpwnam");
+    if (!gRealGetpwnam_r)
+        gRealGetpwnam_r =
+            (int (*)(const char *, struct passwd *, char *, size_t, struct passwd **))
+                ms_passwd_symbol("getpwnam_r");
+}
+
+// Only the current user is redirected: a lookup of another account has to keep the passwd data iOS
+// reports. Written in place because getpwuid_r's result belongs to the caller and has to stay
+// reentrant.
+static void ms_redirect_home(struct passwd *pw) {
+    const char *home;
+    if (!pw || pw->pw_uid != getuid()) return;
+    home = ms_guest_home();
+    if (home) pw->pw_dir = (char *)home;
+}
+
+// A current-user passwd entry for the lookups the real functions cannot serve.
+static int ms_synthesize_passwd(struct passwd *pw, char *buf, size_t buflen) {
+    const char *name = ms_guest_name();
+    const char *home = ms_guest_home();
+    const char *shell = "/bin/sh";
+    if (!pw || !buf || !home) return EINVAL;
+    size_t nameLen = strlen(name) + 1;
+    size_t homeLen = strlen(home) + 1;
+    size_t shellLen = strlen(shell) + 1;
+    if (nameLen + 2 + 1 + homeLen + shellLen > buflen) return ERANGE;
+    char *at = buf;
+    memset(pw, 0, sizeof *pw);
+    pw->pw_name = at;
+    memcpy(at, name, nameLen);
+    at += nameLen;
+    pw->pw_passwd = at;
+    *at++ = '*';
+    *at++ = '\0';
+    pw->pw_gecos = at;
+    *at++ = '\0';
+    pw->pw_dir = at;
+    memcpy(at, home, homeLen);
+    at += homeLen;
+    pw->pw_shell = at;
+    memcpy(at, shell, shellLen);
+    pw->pw_uid = getuid();
+    pw->pw_gid = getgid();
+    return 0;
+}
+
+struct passwd *ms_getpwuid(uid_t uid) {
+    ms_resolve_passwd();
+    if (uid != getuid()) return gRealGetpwuid ? gRealGetpwuid(uid) : NULL;
+    if (gRealGetpwuid && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        struct passwd *pw = gRealGetpwuid(uid);
+        tInsidePasswd = 0;
+        if (pw) {
+            ms_redirect_home(pw);
+            return pw;
+        }
+    }
+    return ms_synthesize_passwd(&gSynthPasswd, gSynthPasswdBuffer, sizeof gSynthPasswdBuffer) == 0
+               ? &gSynthPasswd
+               : NULL;
+}
+
+int ms_getpwuid_r(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
+                  struct passwd **result) {
+    ms_resolve_passwd();
+    if (result) *result = NULL;
+    if (gRealGetpwuid_r && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        int rc = gRealGetpwuid_r(uid, pw, buf, buflen, result);
+        tInsidePasswd = 0;
+        if (rc == 0 && result && *result) ms_redirect_home(*result);
+        return rc;
+    }
+    if (uid != getuid()) return ENOENT;
+    int rc = ms_synthesize_passwd(pw, buf, buflen);
+    if (rc == 0 && result) *result = pw;
+    return rc;
+}
+
+struct passwd *ms_getpwnam(const char *name) {
+    ms_resolve_passwd();
+    if (!name) return NULL;
+    if (gRealGetpwnam && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        struct passwd *pw = gRealGetpwnam(name);
+        tInsidePasswd = 0;
+        if (!pw) return NULL;
+        ms_redirect_home(pw);
+        return pw;
+    }
+    if (strcmp(name, ms_guest_name()) != 0) return NULL;
+    return ms_synthesize_passwd(&gSynthPasswd, gSynthPasswdBuffer, sizeof gSynthPasswdBuffer) == 0
+               ? &gSynthPasswd
+               : NULL;
+}
+
+int ms_getpwnam_r(const char *name, struct passwd *pw, char *buf, size_t buflen,
+                  struct passwd **result) {
+    ms_resolve_passwd();
+    if (result) *result = NULL;
+    if (name && gRealGetpwnam_r && !tInsidePasswd) {
+        tInsidePasswd = 1;
+        int rc = gRealGetpwnam_r(name, pw, buf, buflen, result);
+        tInsidePasswd = 0;
+        if (rc == 0 && result && *result) ms_redirect_home(*result);
+        return rc;
+    }
+    if (!name || strcmp(name, ms_guest_name()) != 0) return ENOENT;
+    int rc = ms_synthesize_passwd(pw, buf, buflen);
+    if (rc == 0 && result) *result = pw;
+    return rc;
+}
+
+typedef struct {
+    const void *replacement;
+    const void *replacee;
+} ms_interposer_t;
+
+__attribute__((used, section("__DATA,__interpose")))
+static const ms_interposer_t ms_passwd_interposers[] = {
+    {(const void *)ms_getpwuid, (const void *)getpwuid},
+    {(const void *)ms_getpwuid_r, (const void *)getpwuid_r},
+    {(const void *)ms_getpwnam, (const void *)getpwnam},
+    {(const void *)ms_getpwnam_r, (const void *)getpwnam_r},
+};
+
+static void ms_log_guest_home(void) {
+    ms_resolve_passwd();
+    const char *home = ms_guest_home();
+    if (!home) {
+        studpad_log("guest home: unavailable (%s, errno %d); HOME and passwd were not changed",
+                    studpad_guest_home_status_name(gGuestHomeStatus), gGuestHomeErrno);
+        return;
+    }
+
+    // ms_guest_home already pinned HOME and CFFIXED_USER_HOME. Read them back together with the
+    // interposed passwd entry: all three are what Qt, Foundation and Studio actually consult.
+    struct passwd *entry = ms_getpwuid(getuid());
+    const char *passwdHome = entry && entry->pw_dir ? entry->pw_dir : "unavailable";
+    const char *envHome = getenv("HOME");
+    const char *fixedHome = getenv("CFFIXED_USER_HOME");
+    studpad_log("guest home: %s", home);
+    studpad_log("guest home: HOME=%s CFFIXED_USER_HOME=%s passwd=%s (uid %u)",
+                envHome ? envHome : "unset", fixedHome ? fixedHome : "unset", passwdHome,
+                (unsigned)getuid());
+    if (!envHome || !fixedHome || strcmp(home, envHome) != 0 || strcmp(home, fixedHome) != 0 ||
+        strcmp(home, passwdHome) != 0) {
+        studpad_log("guest home: INCONSISTENT home lookups: Studio and Qt can resolve ~ differently");
+    } else {
+        studpad_log("guest home: HOME, CFFIXED_USER_HOME and passwd agree");
+    }
+    if (!gRealGetpwuid || !gRealGetpwuid_r || !gRealGetpwnam || !gRealGetpwnam_r)
+        studpad_log("guest home: libsystem_c's passwd functions are unreachable; lookups are served "
+                    "from a synthesised entry");
+}
+static int ms_jit_enabled(void) {
+    typedef int (*CSOps)(pid_t, unsigned int, void *, size_t);
+    CSOps csops = (CSOps)dlsym(RTLD_DEFAULT, "csops");
+    if (!csops) return -1;
+    uint32_t flags = 0;
+    /* Match Henge's CS_OPS_STATUS check; CS_DEBUGGED persists after a debugger detaches. */
+    if (csops(getpid(), 0u, &flags, sizeof(flags)) != 0) return -1;
+    return (flags & UINT32_C(0x10000000)) ? 1 : 0;
+}
+
 static void ms_log_runtime_environment(void) {
     int attached = ms_debugger_attached();
-    studpad_log("debugger attached: %s (StikDebug)",
+    int jitEnabled = ms_jit_enabled();
+    studpad_log("GetMoreRam entitlement check: %s",
+                studpad_increased_memory_enabled() ? "active" : "not present");
+    studpad_log("debugger currently tracing (P_TRACED): %s",
                 attached == 1 ? "yes" : attached == 0 ? "no" : "unknown");
+    studpad_log("JIT entitlement check (CS_DEBUGGED): %s",
+                jitEnabled == 1 ? "enabled" : jitEnabled == 0 ? "not detected" : "unavailable");
 
     void *probe = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANON, -1, 0);
     if (probe == MAP_FAILED) {
-        studpad_log("JIT: executable mmap refused (errno %d); Studio does not use a JIT itself",
+        studpad_log("JIT executable-memory probe: mmap refused (errno %d); this does not test CS_DEBUGGED",
                     errno);
     } else {
-        studpad_log("JIT: executable mmap granted");
+        studpad_log("JIT executable-memory probe: mmap granted; this does not prove CS_DEBUGGED or Studio JIT use");
         munmap(probe, 0x4000);
     }
 
@@ -1052,16 +2155,58 @@ static void ms_log_runtime_environment(void) {
     studpad_log("memory: %.0f MB available to this process, %.0f MB physical",
                 available / 1048576.0, physical / 1048576.0);
     if (available < 800ull * 1024 * 1024) {
-        studpad_log("memory: below 800 MB; add Increased Memory Limit to com.kuywoh.studpadstudio "
-                    "with GetMoreRam, then reinstall in SideStore");
+        studpad_log("memory: current headroom below 800 MB; this is not the per-app limit. If the "
+                    "app is stopped by memory pressure, verify Increased Memory Limit on "
+                    "com.kuywoh.studpadstudio with GetMoreRam and refresh SideStore");
     }
+    ms_log_allocator();
+    ms_log_guest_home();
+}
+
+void studpad_set_studio_launch_path(const char *path) {
+    free(gStudioLaunchPath);
+    gStudioLaunchPath = path ? strdup(path) : NULL;
+}
+
+int studpad_debugger_attached(void) {
+    return ms_debugger_attached();
+}
+
+int studpad_jit_enabled(void) {
+    return ms_jit_enabled();
+}
+
+int studpad_increased_memory_enabled(void) {
+    typedef CFTypeRef (*CreateTask)(CFAllocatorRef);
+    typedef CFTypeRef (*CopyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *);
+    CreateTask create = (CreateTask)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+    CopyEntitlement copy = (CopyEntitlement)dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+    if (!create || !copy) return 0;
+    CFTypeRef task = create(kCFAllocatorDefault);
+    if (!task) return 0;
+    CFTypeRef value = copy(task, CFSTR("com.apple.developer.kernel.increased-memory-limit"), NULL);
+    int enabled = value && CFGetTypeID(value) == CFBooleanGetTypeID() &&
+                  CFBooleanGetValue((CFBooleanRef)value);
+    if (value) CFRelease(value);
+    CFRelease(task);
+    return enabled;
 }
 
 void studpad_guest_start(void) {
     if (gStarted++) return;
+    UIScreen *mainScreen = UIScreen.mainScreen;
+    studpad_set_main_screen_bounds(mainScreen.bounds);
+    studpad_log("[shim] CoreGraphics display %u: %.0f x %.0f points",
+                CGMainDisplayID(), mainScreen.bounds.size.width, mainScreen.bounds.size.height);
     NSString *bundle = NSBundle.mainBundle.bundlePath;
     NSString *guest = [bundle stringByAppendingPathComponent:@"Frameworks/StudioKit"];
     NSString *plugins = [bundle stringByAppendingPathComponent:@"Frameworks/PlugIns"];
+    NSString *launchArgument = gStudioLaunchPath
+        ? [NSString stringWithUTF8String:gStudioLaunchPath] : guest;
+    NSString *launchDirectory = launchArgument.stringByDeletingLastPathComponent;
+    NSString *resourceDirectory = [[launchDirectory stringByAppendingPathComponent:@"../Resources"]
+        stringByStandardizingPath];
+    NSString *settingsPath = [resourceDirectory stringByAppendingPathComponent:@"AppSettings.xml"];
 
     studpad_log("=== StudPad Studio shim ===");
     studpad_log("device: %s %s (%s)", UIDevice.currentDevice.systemName.UTF8String,
@@ -1074,7 +2219,14 @@ void studpad_guest_start(void) {
         studpad_log("guest missing at %s (this IPA was built without Studio)", guest.UTF8String);
         return;
     }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:settingsPath]) {
+        studpad_log("Studio Resources are missing at %s; download the matching Studio package first",
+                    resourceDirectory.UTF8String);
+        return;
+    }
     studpad_log("guest: %s", guest.UTF8String);
+    studpad_log("Studio argv[0]: %s", launchArgument.UTF8String);
+    studpad_log("Studio Resources: %s", resourceDirectory.UTF8String);
 
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)
                          .firstObject;
@@ -1084,17 +2236,22 @@ void studpad_guest_start(void) {
     // Qt's own platform plugin is the only path that can produce a visible Studio window.
     NSString *platform = options[@"QtPlatform"] ? options[@"QtPlatform"] : @"cocoa";
     NSString *style = options[@"QtStyle"] ? options[@"QtStyle"] : @"fusion";
-    studpad_log("Qt platform: %s, style: %s (Documents/studpad.plist)", platform.UTF8String,
-                style.UTF8String);
+    // Keep the Cocoa QPA backend for its UIKit-hosted window and input bridge, but select Qt's
+    // generic theme. QCocoaTheme builds its startup palette by messaging AppKit NSColor objects,
+    // which are not fully implemented by iOS; entering that path crashes before QApplication opens.
+    studpad_log("Qt platform: %s, style: %s, theme: generic (avoids QCocoaTheme palette)",
+                platform.UTF8String, style.UTF8String);
 
     setenv("QT_PLUGIN_PATH", plugins.fileSystemRepresentation, 1);
     setenv("QT_QPA_PLATFORM_PLUGIN_PATH",
            [plugins stringByAppendingPathComponent:@"platforms"].fileSystemRepresentation, 1);
     setenv("QT_QPA_PLATFORM", platform.UTF8String, 1);
+    setenv("QT_QPA_PLATFORMTHEME", "generic", 1);
     setenv("QT_STYLE_OVERRIDE", style.UTF8String, 1);
     setenv("QT_LOGGING_RULES", "qt.qpa.*=true", 1);
     setenv("QT_LOGGING_TO_CONSOLE", "1", 1);
-    chdir(bundle.fileSystemRepresentation);
+    if (chdir(launchDirectory.fileSystemRepresentation) != 0)
+        studpad_log("could not set Studio working directory: %s", strerror(errno));
 
     uint32_t before = _dyld_image_count();
     studpad_log("dlopen(RTLD_NOW|RTLD_GLOBAL)");
@@ -1121,8 +2278,10 @@ void studpad_guest_start(void) {
     studpad_log("guest header %p, entry 0x%llx", header, (unsigned long long)entryoff);
 
     int (*entry)(int, char **, char **, char **) = (void *)((uintptr_t)header + entryoff);
-    char *argv[] = {(char *)guest.fileSystemRepresentation, NULL};
+    char *argv[] = {(char *)launchArgument.fileSystemRepresentation, NULL};
     studpad_log("calling Studio main");
     int rc = entry(1, argv, environ, NULL);
     studpad_log("Studio main returned %d (stub calls: %ld)", rc, studpad_stub_count());
 }
+
+

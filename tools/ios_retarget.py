@@ -17,8 +17,8 @@ One file per run, written to a new path (the input is never modified):
                @executable_path/../Frameworks/... -> @rpath/...
                @executable_path/../Frameworks / @loader_path/../Frameworks rpath -> @executable_path/Frameworks
   shim         frameworks with no iOS equivalent -> @rpath/libMacShim.dylib
-  execute      MH_EXECUTE -> MH_DYLIB (`__PAGEZERO`'s load command becomes `LC_ID_DYLIB`, `LC_MAIN`
-               stays so the host can call it, MH_PIE cleared), as LiveContainer does
+  execute      MH_EXECUTE -> MH_DYLIB, `__PAGEZERO` maps at 0xffffc000/0x4000, `LC_MAIN` stays so
+               the host can call it, and segment ordinals stay unchanged
   duplicates   several macOS frameworks map to the same shim path: keep the first load command and
                renumber the import ordinals so every bind still reaches the right library
   --reroute    imports listed in FILE bind to libMacShim instead of the library the macOS binary
@@ -40,11 +40,13 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
 MH_DYLIB = 6
 MH_PIE = 0x200000
+MH_NO_REEXPORTED_DYLIBS = 0x1000000
 
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 LC_LOAD_DYLIB = 0xC
 LC_ID_DYLIB = 0xD
+LC_LOAD_DYLINKER = 0xE
 LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LOAD_UPWARD_DYLIB = 0x80000023
@@ -74,6 +76,7 @@ SHIM_FRAMEWORKS = {
     "ColorSync",
     "IOKit",
     "OpenGL",
+    "AudioUnit",
 }
 # dylibs that are not part of iOS (the shim provides offline/no-op versions)
 SHIM_DYLIBS = {"/usr/lib/libcups.2.dylib", "/usr/lib/libcups.dylib"}
@@ -141,6 +144,10 @@ def cstr(data: bytearray, start: int, end: int) -> str:
     if nul < 0:
         raise SystemExit(f"unterminated string at {start}")
     return bytes(data[start:nul]).decode("utf-8", "replace")
+
+
+def fixed_name(data: bytearray, start: int) -> str:
+    return bytes(data[start : start + 16]).split(b"\0", 1)[0].decode("utf-8", "replace")
 
 
 def dylib_name(data: bytearray, off: int, size: int) -> tuple[int, str]:
@@ -239,41 +246,86 @@ def make_loadable(data: bytearray) -> list[str]:
     if h["ftype"] != MH_EXECUTE:
         return ["already a dylib/bundle; filetype kept"]
 
-    pagezero = pagezero_size = None
-    for off, cmd, size in commands(data):
-        if cmd == LC_SEGMENT_64 and cstr(data, off + 8, off + 24) == "__PAGEZERO":
-            pagezero, pagezero_size = off, size
+    pagezero = None
+    for off, cmd, _size in commands(data):
+        if cmd == LC_SEGMENT_64:
+            if fixed_name(data, off + 8) == "__PAGEZERO":
+                pagezero = off
     if pagezero is None:
         raise SystemExit("executable has no __PAGEZERO segment")
 
-    vmaddr, vmsize = struct.unpack_from("<QQ", data, pagezero + 24)
-    if vmsize:
-        struct.pack_into("<QQ", data, pagezero + 24, vmaddr, 0x4000)
-
-    # The segment's load command becomes LC_ID_DYLIB in place: no room is needed after the load
-    # commands, and a segment index is only load-bearing for chained fixups, which Studio's main
-    # executable does not use.
-    for off, cmd, size in commands(data):
-        if cmd == LC_DYLD_CHAINED_FIXUPS:
-            raise SystemExit(
-                "executable uses chained fixups: converting __PAGEZERO would renumber its segments"
-            )
-
-    name = b"@rpath/StudioKit.dylib\0"
-    needed = 24 + len(name)
-    if needed > pagezero_size:
-        raise SystemExit(
-            f"__PAGEZERO's load command is too small for LC_ID_DYLIB ({pagezero_size} < {needed})"
-        )
-    data[pagezero : pagezero + pagezero_size] = (
-        struct.pack("<IIIIII", LC_ID_DYLIB, pagezero_size, 24, 2, 0x10000, 0x10000)
-        + name
-        + b"\0" * (pagezero_size - needed)
-    )
+    id_result = add_dylib_id(data)
+    # Keep the segment command: dyld rebase/bind streams and chained fixups refer to segment
+    # ordinals. Mapping one page at the top of the original 4 GB zero region also avoids reserving
+    # the whole address range.
+    struct.pack_into("<QQ", data, pagezero + 24, 0x100000000 - 0x4000, 0x4000)
 
     struct.pack_into("<I", data, 12, MH_DYLIB)
-    struct.pack_into("<I", data, 24, h["flags"] & ~MH_PIE)
-    return ["MH_EXECUTE -> MH_DYLIB (__PAGEZERO one page, LC_ID_DYLIB, LC_MAIN kept, PIE off)"]
+    struct.pack_into(
+        "<I", data, 24, (h["flags"] & ~MH_PIE) | MH_NO_REEXPORTED_DYLIBS
+    )
+    return [
+        "MH_EXECUTE -> MH_DYLIB (__PAGEZERO mapped at 0xffffc000/0x4000, LC_MAIN kept, "
+        "PIE off, no re-exports; segment ordinals preserved)",
+        id_result,
+    ]
+
+
+def add_dylib_id(data: bytearray) -> str:
+    """Give the converted image the LC_ID_DYLIB required for a loadable MH_DYLIB."""
+    h = header(data)
+    load_commands = commands(data)
+    if any(cmd == LC_ID_DYLIB for _off, cmd, _size in load_commands):
+        return "LC_ID_DYLIB already present"
+
+    text_offset = None
+    dylinker = None
+    for off, cmd, size in load_commands:
+        if cmd == LC_LOAD_DYLINKER:
+            dylinker = (off, size)
+        if cmd != LC_SEGMENT_64 or fixed_name(data, off + 8) != "__TEXT":
+            continue
+        nsects = struct.unpack_from("<I", data, off + 64)[0]
+        if 72 + nsects * 80 > size:
+            raise SystemExit("__TEXT segment has a truncated section table")
+        for i in range(nsects):
+            section = off + 72 + i * 80
+            section_name = fixed_name(data, section)
+            section_offset = struct.unpack_from("<I", data, section + 48)[0]
+            if section_name == "__text" and section_offset:
+                text_offset = section_offset if text_offset is None else min(text_offset, section_offset)
+
+    load_end = 32 + h["szcmds"]
+    name = b"@rpath/StudioKit.dylib\0"
+    cmdsize = 24 + ((len(name) + 7) & ~7)
+    if (
+        text_offset is not None
+        and load_end + cmdsize <= text_offset
+        and load_end + cmdsize <= len(data)
+        and not any(data[load_end : load_end + cmdsize])
+    ):
+        data[load_end : load_end + cmdsize] = _id_dylib_command(cmdsize, name)
+        struct.pack_into("<II", data, 16, h["ncmds"] + 1, h["szcmds"] + cmdsize)
+        return "inserted LC_ID_DYLIB in __TEXT load-command padding"
+
+    if dylinker:
+        off, size = dylinker
+        fallback_name = b"StudPad\0"
+        if size >= 24 + len(fallback_name) and size % 8 == 0:
+            data[off : off + size] = _id_dylib_command(size, fallback_name)
+            return "reused LC_LOAD_DYLINKER slot for LC_ID_DYLIB"
+
+    raise SystemExit("not enough safe load-command space for required LC_ID_DYLIB")
+
+
+def _id_dylib_command(size: int, name: bytes) -> bytes:
+    if size < 24 + len(name):
+        raise SystemExit("LC_ID_DYLIB command is too small for its install name")
+    return (
+        struct.pack("<IIIIII", LC_ID_DYLIB, size, 24, 2, 0x10000, 0x10000)
+        + name
+        + b"\0" * (size - 24 - len(name))
+    )
 
 
 def _uleb(data: bytearray, i: int) -> tuple[int, int]:
@@ -291,6 +343,15 @@ def _skip_uleb(data: bytearray, i: int) -> int:
     while data[i] & 0x80:
         i += 1
     return i + 1
+
+
+def _skip_uleb_checked(data: bytearray, i: int, end: int, which: str) -> int:
+    while i < end:
+        byte = data[i]
+        i += 1
+        if not byte & 0x80:
+            return i
+    raise SystemExit(f"{which}: unterminated ULEB128")
 
 
 def _bad_opcode(data: bytearray, pos: int, which: str) -> None:
@@ -320,6 +381,8 @@ def _bind_step(data: bytearray, i: int, end: int, which: str) -> tuple[int, str,
         if nul < 0:
             raise SystemExit(f"{which}: unterminated bind symbol at {i}")
         return nul + 1, "symbol", None
+    if op == 0x70:  # SET_SEGMENT_AND_OFFSET_ULEB
+        return _skip_uleb_checked(data, i, end, which), "segment_imm", imm
     if op in (0x00, 0x30, 0x50, 0x90, 0xB0):  # DONE / SPECIAL_IMM / TYPE_IMM / DO_BIND / IMM_SCALED
         return i, "other", None
     if op in (0x60, 0x70, 0x80, 0xA0):  # ADDEND_SLEB / SEGMENT+ULEB / ADD_ADDR / DO_BIND+ULEB

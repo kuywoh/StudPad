@@ -7,10 +7,14 @@ runs. What Studio does is in Documents/studio.log on the iPad.
 
 import os
 import plistlib
+import re
 import struct
 import subprocess
 import sys
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tools.disable_macho_interpose import active_interpose_tuple_count
 
 MH_MAGIC_64 = 0xFEEDFACF
 MH_EXECUTE = 2
@@ -30,8 +34,10 @@ ROOT = "Payload/StudPadStudio.app"
 GUEST = f"{ROOT}/Frameworks/StudioKit"
 HOST = f"{ROOT}/StudPadStudio"
 SHIM = f"{ROOT}/Frameworks/libMacShim.dylib"
+MIMALLOC = f"{ROOT}/Frameworks/libmimalloc.3.dylib"
 QTCORE = f"{ROOT}/Frameworks/libQtCore.dylib"
 QCOCOA = f"{ROOT}/Frameworks/PlugIns/platforms/libqcocoa.dylib"
+MANIFEST = f"{ROOT}/StudioPackage.plist"
 
 
 def fail(msg):
@@ -78,6 +84,14 @@ def inspect(data):
     return dict(filetype=filetype, platform=platform, has_main=has_main, id=install_id, loads=loads)
 
 
+def validate_bundle_version(plist, expected=None):
+    version = plist.get("CFBundleVersion")
+    if not isinstance(version, str) or not version.strip():
+        fail("no CFBundleVersion: the installed app cannot identify its build")
+    if expected and version != expected:
+        fail(f"CFBundleVersion is {version!r}, expected workflow run {expected!r}")
+
+
 def main():
     if len(sys.argv) != 2:
         fail("usage: verify.py <ipa>")
@@ -85,7 +99,7 @@ def main():
     z = zipfile.ZipFile(ipa)
     names = set(z.namelist())
 
-    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, QTCORE, QCOCOA, f"{ROOT}/qt.conf"):
+    for required in (HOST, f"{ROOT}/Info.plist", GUEST, SHIM, MIMALLOC, QTCORE, QCOCOA, MANIFEST, f"{ROOT}/qt.conf"):
         if required not in names:
             fail(f"missing {required}")
 
@@ -96,7 +110,8 @@ def main():
         fail(f"guest platform {guest['platform']}, expected iOS (2)")
     if not guest["has_main"]:
         fail("guest has no LC_MAIN: the host cannot find Studio's entry point")
-    if guest["id"] != "@rpath/StudioKit.dylib":
+    # The host opens StudioKit by bundle path, so this short ID is safe if load-command padding is unavailable.
+    if guest["id"] not in ("@rpath/StudioKit.dylib", "StudPad"):
         fail(f"guest LC_ID_DYLIB is {guest['id']!r}")
     if "@rpath/libMacShim.dylib" not in guest["loads"]:
         fail("guest does not link libMacShim.dylib: AppKit was not redirected")
@@ -114,11 +129,29 @@ def main():
     if qt["id"] != "@rpath/libQtCore.dylib":
         fail(f"QtCore LC_ID_DYLIB is {qt['id']!r}, expected the flat name")
 
+    interpose_count = active_interpose_tuple_count(z.read(MIMALLOC))
+    if not interpose_count:
+        fail("mimalloc allocator interposition is missing or disabled")
+    # Active tuples are not enough: dyld only reads them from an image loaded at launch, so the
+    # guest must keep binding mi_* to the dylib and the host must load it (build.sh links it).
+    if not any("libmimalloc" in p for p in guest["loads"]):
+        fail("guest does not link Studio's mimalloc: its mi_* imports would not resolve")
+
     shim = inspect(z.read(SHIM))
     if shim["filetype"] != MH_DYLIB or shim["platform"] != 2:
         fail(f"shim filetype/platform {shim['filetype']}/{shim['platform']}, expected 6/2")
     if shim["id"] != "@rpath/libMacShim.dylib":
         fail(f"shim LC_ID_DYLIB is {shim['id']!r}")
+    # Studio takes `~` from the passwd entry (StudioKit imports getpwuid/getpwuid_r, Qt getpwnam_r),
+    # and iOS reports /var/mobile there; the sandbox then refuses Studio's ~/Library/Roblox mkdir.
+    # The shim interposes those calls to report the app container, so the tuples must be in the
+    # shipped dylib: dyld only reads __interpose from launch images, and the host links the shim.
+    passwd_interposers = active_interpose_tuple_count(z.read(SHIM))
+    if passwd_interposers < 4:
+        fail(
+            f"shim has {passwd_interposers} active __interpose tuple(s); the passwd home "
+            "redirection needs getpwuid, getpwuid_r, getpwnam and getpwnam_r "
+        )
 
     host_data = z.read(HOST)
     host = inspect(host_data)
@@ -126,6 +159,11 @@ def main():
         fail(f"host filetype/platform {host['filetype']}/{host['platform']}, expected 2/2")
     if "@rpath/libMacShim.dylib" not in host["loads"]:
         fail("host does not link the shim, so studpad_guest_start cannot be called")
+    if not any("libmimalloc" in p for p in host["loads"]):
+        fail(
+            "host does not load Studio's mimalloc at launch: dyld only applies its malloc "
+            "interposition to launch images, so Qt and StudioKit would use different heaps"
+        )
     mode = (z.getinfo(HOST).external_attr >> 16) & 0o777
     if not mode & 0o111:
         fail(f"host executable mode is {mode:o}")
@@ -133,20 +171,39 @@ def main():
     plist = plistlib.loads(z.read(f"{ROOT}/Info.plist"))
     if plist.get("CFBundleExecutable") != "StudPadStudio":
         fail(f"CFBundleExecutable is {plist.get('CFBundleExecutable')!r}")
-    if not plist.get("CFBundleIdentifier"):
-        fail("no CFBundleIdentifier: the iOS installer refuses the bundle with 'Missing bundle ID'")
+    if plist.get("CFBundleIdentifier") != "com.kuywoh.studpadstudio":
+        fail(f"unexpected CFBundleIdentifier: {plist.get('CFBundleIdentifier')!r}")
+    validate_bundle_version(plist, os.environ.get("GITHUB_RUN_NUMBER"))
     if plist.get("UIFileSharingEnabled") is not True:
         fail("Documents sharing is off: the log would not be readable")
     if "UIApplicationSceneManifest" not in plist:
         fail("no scene manifest: iPadOS 26 leaves the app on a black screen")
 
-    if not any(name.startswith(f"{ROOT}/Resources/") for name in names):
-        print("warning: no Resources/ in the IPA; Studio's assets may be missing")
+    manifest = plistlib.loads(z.read(MANIFEST))
+    required_manifest_keys = {
+        "studio_version", "package_url", "package_bytes", "package_sha256",
+        "app_bundle_name", "resource_files", "resource_bytes",
+    }
+    if not required_manifest_keys.issubset(manifest):
+        fail("StudioPackage.plist is missing download metadata")
+    if not manifest["package_url"].startswith("https://setup.rbxcdn.com/mac/arm64/version-") or not manifest["package_url"].endswith("-RobloxStudioApp.zip"):
+        fail("StudioPackage.plist is not pinned to the Roblox Mac Studio CDN")
+    if not isinstance(manifest["package_bytes"], int) or manifest["package_bytes"] <= 100 * 1024 * 1024:
+        fail("StudioPackage.plist has an invalid package size")
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest["package_sha256"]):
+        fail("StudioPackage.plist has an invalid SHA-256")
+    if not manifest["app_bundle_name"].endswith(".app") or manifest["resource_files"] <= 0:
+        fail("StudioPackage.plist has invalid app or resource metadata")
+    if any(name.startswith(f"{ROOT}/Resources/") for name in names):
+        fail("large Studio Resources are still embedded in the installer IPA")
 
     print(
-        f"verify: guest MH_DYLIB iOS + LC_MAIN + shim link; QtCore flat dylib; "
-        f"shim {len(shim['loads'])} re-exported frameworks; host MH_EXECUTE iOS mode={mode:o}; "
-        f"IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
+        f"verify: bundle ID {plist['CFBundleIdentifier']}; guest MH_DYLIB iOS + LC_MAIN + shim link; "
+        f"QtCore flat dylib; mimalloc interposition active ({interpose_count} tuples) and a host "
+        f"launch load command; shim {len(shim['loads'])} re-exported frameworks and "
+        f"{passwd_interposers} passwd interposer(s); "
+        f"host MH_EXECUTE iOS mode={mode:o}; Studio resources download pinned to "
+        f"{manifest['studio_version']}; IPA {sum(i.file_size for i in z.infolist())} bytes uncompressed"
     )
 
 

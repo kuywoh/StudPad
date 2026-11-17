@@ -1,55 +1,187 @@
-// StudPad host: a normal UIKit app (so the 20 s launch watchdog is satisfied) that shows the log and
-// then hands the main thread to the shim, which loads the retargeted Studio executable.
+// StudPad host: a small UIKit setup screen downloads the matching official Roblox Studio
+// package's Resources on first run, then launches the retargeted, signed engine in the IPA.
 //
-// The log is on screen and in Documents/studio.log (visible in Files → On My iPad → StudPad Studio).
-// Everything is written before Studio starts, so a crash still leaves the log behind.
+// The package download is pinned to the version used by CI, so assets cannot drift away from the
+// embedded iOS-compatible StudioKit. Logs remain in Documents/studio.log.
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <CoreFoundation/CoreFoundation.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <limits.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/ucontext.h>
+#include <stdio.h>
 #import "MacShim.h"
+#import "zip_resources.h"
+#import "sha256_file.h"
 
 static UITextView *gLogView;
+static UIButton *gLogButton;
 static NSMutableString *gText;
 static UIView *gStudioHost;
+static UIView *gSetupView;
 static UIActivityIndicatorView *gSpinner;
+static UILabel *gStatusLabel;
+static UILabel *gMemoryStatusLabel;
+static UILabel *gJitStatusLabel;
+static UILabel *gProgressLabel;
+static UIProgressView *gProgressView;
+static UIButton *gDownloadButton;
+static UIButton *gLaunchButton;
+static UILabel *gCrashLabel;
+
+// iOS does not always pre-create Documents, and without it every log write below silently fails.
+// Create it from a C constructor so the directory and the early breadcrumb exist even if the app
+// dies before UIApplicationMain returns.
+static const char *studpad_documents_dir(void) {
+    static char path[PATH_MAX];
+    static int ready;
+    if (!ready) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            int written = snprintf(path, sizeof path, "%s/Documents", home);
+            if (written > 0 && (size_t)written < sizeof path) mkdir(path, 0700);
+            else path[0] = '\0';
+        }
+        ready = 1;
+    }
+    return path[0] ? path : NULL;
+}
+
+static const char *studpad_crash_flag_path(void) {
+    static char path[PATH_MAX];
+    static int ready;
+    if (!ready) {
+        const char *docs = studpad_documents_dir();
+        if (docs) {
+            int written = snprintf(path, sizeof path, "%s/last-crash.txt", docs);
+            if (written <= 0 || (size_t)written >= sizeof path) path[0] = '\0';
+        }
+        ready = 1;
+    }
+    return path[0] ? path : NULL;
+}
+
+__attribute__((constructor)) static void studpad_early_launch_breadcrumb(void) {
+    const char *docs = studpad_documents_dir();
+    if (!docs) return;
+    char path[PATH_MAX];
+    int written = snprintf(path, sizeof path, "%s/studio.log", docs);
+    if (written <= 0 || (size_t)written >= sizeof path) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    char line[192];
+    int length = snprintf(line, sizeof line,
+                          "=== StudPad host initializers ran (pid %d) ===\n", getpid());
+    if (length > 0) {
+        ssize_t ignored = write(fd, line, (size_t)length);
+        (void)ignored;
+    }
+    fsync(fd);
+    close(fd);
+}
+
+static NSDictionary *read_dictionary_plist(NSString *path) {
+    if (path.length == 0) return nil;
+    CFDataRef data = studpad_copy_file_data(path.fileSystemRepresentation);
+    if (!data) return nil;
+    CFErrorRef error = NULL;
+    CFPropertyListRef value = CFPropertyListCreateWithData(
+        kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    CFRelease(data);
+    if (error) CFRelease(error);
+    if (!value) return nil;
+    if (CFGetTypeID(value) != CFDictionaryGetTypeID()) {
+        CFRelease(value);
+        return nil;
+    }
+    return CFBridgingRelease(value);
+}
 
 static void host_log(const char *line) {
     if (!gText) gText = [NSMutableString new];
     NSString *text = [NSString stringWithUTF8String:line];
     if (!text) return;
-    // Studio runs on the main thread, so the run loop is the only way the view gets updated.
-    @synchronized(gText) {
-        [gText appendString:text];
-    }
+    @synchronized(gText) { [gText appendString:text]; }
     NSMutableString *snapshot = nil;
-    @synchronized(gText) {
-        snapshot = [gText copy];
-    }
+    @synchronized(gText) { snapshot = [gText copy]; }
     dispatch_async(dispatch_get_main_queue(), ^{
         gLogView.text = snapshot;
-        if (snapshot.length) {
-            [gLogView scrollRangeToVisible:NSMakeRange(snapshot.length - 1, 1)];
-        }
+        if (snapshot.length) [gLogView scrollRangeToVisible:NSMakeRange(snapshot.length - 1, 1)];
     });
 }
 
-static void crash_signal(int sig) {
+static void crash_signal(int sig, siginfo_t *info, void *context) {
     const char *name = strsignal(sig);
-    char head[160];
-    snprintf(head, sizeof head, "\n=== signal %d (%s) ===\n", sig, name ? name : "?");
+    char head[192];
+    snprintf(head, sizeof head, "\n=== signal %d (%s), address %p ===\n", sig, name ? name : "?",
+             info ? info->si_addr : NULL);
+
     int fd = open(studpad_log_path_c(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int flag = -1;
+    const char *flagPath = studpad_crash_flag_path();
+    if (flagPath) flag = open(flagPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (flag >= 0) {
+        ssize_t ignored = write(flag, head, strlen(head));
+        const char *logPath = studpad_log_path_c();
+        if (logPath && *logPath) {
+            char line[PATH_MAX + 32];
+            int length = snprintf(line, sizeof line, "full log: %s\n", logPath);
+            if (length > 0) ignored = write(flag, line, (size_t)length);
+        }
+        (void)ignored;
+    }
+
     if (fd >= 0) {
         ssize_t ignored = write(fd, head, strlen(head));
-        void *frames[80];
-        int count = backtrace(frames, 80);
-        backtrace_symbols_fd(frames, count, fd);
+        // The backtrace only resolves exported symbols, so an abort inside a static helper (Qt's
+        // destructors, libsystem_malloc's error path) shows a bare address. The registers are the
+        // rest of the story: on arm64 x0 is the first argument, so a free() that aborted still says
+        // which pointer it was handed.
+#if defined(__arm64__)
+        if (context) {
+            ucontext_t *uc = (ucontext_t *)context;
+            uint64_t *x = uc->uc_mcontext->__ss.__x;
+            char regs[512];
+            snprintf(regs, sizeof regs,
+                     "registers: x0=%#llx x1=%#llx x2=%#llx x3=%#llx x4=%#llx x5=%#llx x6=%#llx "
+                     "x7=%#llx pc=%#llx lr=%#llx sp=%#llx\n",
+                     (unsigned long long)x[0], (unsigned long long)x[1],
+                     (unsigned long long)x[2], (unsigned long long)x[3],
+                     (unsigned long long)x[4], (unsigned long long)x[5],
+                     (unsigned long long)x[6], (unsigned long long)x[7],
+                     (unsigned long long)uc->uc_mcontext->__ss.__pc,
+                     (unsigned long long)uc->uc_mcontext->__ss.__lr,
+                     (unsigned long long)uc->uc_mcontext->__ss.__sp);
+            ignored = write(fd, regs, strlen(regs));
+            if (flag >= 0) ignored = write(flag, regs, strlen(regs));
+        }
+#endif
+        (void)ignored;
+    }
+
+    void *frames[80];
+    int count = backtrace(frames, 80);
+    if (fd >= 0) backtrace_symbols_fd(frames, count, fd);
+    if (flag >= 0) {
+        backtrace_symbols_fd(frames, count, flag);
         const char tail[] = "=== end ===\n";
-        ignored = write(fd, tail, sizeof tail - 1);
+        ssize_t ignored = write(flag, tail, sizeof tail - 1);
+        (void)ignored;
+        fsync(flag);
+        close(flag);
+    }
+    if (fd >= 0) {
+        const char tail[] = "=== end ===\n";
+        ssize_t ignored = write(fd, tail, sizeof tail - 1);
         (void)ignored;
         fsync(fd);
         close(fd);
@@ -57,51 +189,591 @@ static void crash_signal(int sig) {
     _exit(128 + sig);
 }
 
-@interface StudPadViewController : UIViewController
+@interface StudPadViewController : UIViewController <NSURLSessionDownloadDelegate>
+@property(nonatomic, strong) NSURLSession *downloadSession;
+@property(nonatomic, strong) NSURL *downloadedZipURL;
+@property(nonatomic, strong) NSURL *packageURL;
+@property(nonatomic, strong) NSDictionary *packageManifest;
+@property(nonatomic, copy) NSString *studioVersion;
+@property(nonatomic, copy) NSString *downloadFailure;
 @end
 
 @implementation StudPadViewController
 
+- (NSURL *)supportRoot {
+    NSURL *base = [[NSFileManager defaultManager]
+        URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *root = [base URLByAppendingPathComponent:@"StudPad" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:root
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    return root;
+}
+
+- (NSURL *)resourcesURL {
+    return [[[[self supportRoot] URLByAppendingPathComponent:@"RobloxStudio.app" isDirectory:YES]
+        URLByAppendingPathComponent:@"Contents" isDirectory:YES]
+        URLByAppendingPathComponent:@"Resources" isDirectory:YES];
+}
+
+- (BOOL)studioContentIsReady {
+    NSURL *root = [self supportRoot];
+    NSString *stored = [NSString stringWithContentsOfURL:[root URLByAppendingPathComponent:@"studio-content.version"]
+                                                encoding:NSUTF8StringEncoding error:nil];
+    stored = [stored stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *settings = [[self resourcesURL] URLByAppendingPathComponent:@"AppSettings.xml"].path;
+    return [stored isEqualToString:self.studioVersion] &&
+           [[NSFileManager defaultManager] fileExistsAtPath:settings];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.blackColor;
+    studpad_log("Setup view loading");
+    self.view.backgroundColor = [UIColor colorWithRed:0.055 green:0.07 blue:0.1 alpha:1];
+
+    NSString *manifestPath = [[NSBundle mainBundle] pathForResource:@"StudioPackage" ofType:@"plist"];
+    self.packageManifest = manifestPath ? read_dictionary_plist(manifestPath) : nil;
+    NSString *urlText = self.packageManifest[@"package_url"];
+    NSURL *url = [NSURL URLWithString:urlText ?: @""];
+    if ([url.scheme isEqualToString:@"https"] &&
+        [url.host isEqualToString:@"setup.rbxcdn.com"] &&
+        [url.path hasPrefix:@"/mac/arm64/version-"] &&
+        [url.path hasSuffix:@"-RobloxStudioApp.zip"] &&
+        [self.packageManifest[@"package_sha256"] length] == CC_SHA256_DIGEST_LENGTH * 2 &&
+        [self.packageManifest[@"app_bundle_name"] hasSuffix:@".app"]) {
+        self.packageURL = url;
+        self.studioVersion = self.packageManifest[@"studio_version"];
+    } else {
+        self.packageManifest = nil;
+        self.studioVersion = nil;
+    }
 
     gStudioHost = [[UIView alloc] initWithFrame:self.view.bounds];
     gStudioHost.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     gStudioHost.backgroundColor = UIColor.blackColor;
+    gStudioHost.hidden = YES;
     [self.view addSubview:gStudioHost];
 
     gSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    gSpinner.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds) / 2);
-    gSpinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+    gSpinner.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:gSpinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [gSpinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [gSpinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+    ]];
 
-    CGFloat height = self.view.bounds.size.height;
-    gLogView = [[UITextView alloc] initWithFrame:CGRectMake(0, height * 0.55, self.view.bounds.size.width, height * 0.45)];
-    gLogView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    gLogView = [[UITextView alloc] initWithFrame:CGRectZero];
+    gLogView.translatesAutoresizingMaskIntoConstraints = NO;
     gLogView.editable = NO;
     gLogView.selectable = YES;
     gLogView.textColor = UIColor.greenColor;
-    gLogView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+    gLogView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.88];
     gLogView.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
-    gLogView.text = @"starting…";
+    gLogView.text = @"StudPad log";
+    gLogView.hidden = YES;
     [self.view addSubview:gLogView];
+    studpad_set_log_overlay((__bridge void *)gLogView);
+
+    gLogButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    gLogButton.translatesAutoresizingMaskIntoConstraints = NO;
+    gLogButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    gLogButton.layer.cornerRadius = 8;
+    [gLogButton setTitle:@"Logs" forState:UIControlStateNormal];
+    [gLogButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [gLogButton addTarget:self action:@selector(toggleLogPanel:)
+         forControlEvents:UIControlEventTouchUpInside];
+    gLogButton.hidden = YES;
+    [self.view addSubview:gLogButton];
+    studpad_set_log_button((__bridge void *)gLogButton);
+    [NSLayoutConstraint activateConstraints:@[
+        [gLogButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
+        [gLogButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
+        [gLogButton.widthAnchor constraintGreaterThanOrEqualToConstant:54],
+        [gLogButton.heightAnchor constraintEqualToConstant:36],
+        [gLogView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [gLogView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [gLogView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [gLogView.heightAnchor constraintEqualToAnchor:self.view.heightAnchor multiplier:0.45],
+    ]];
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
+        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+    ]];
+
+    gSetupView = scroll;
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 14;
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:stack];
+    NSLayoutConstraint *stackWidth = [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor
+                                                                      constant:-44];
+    stackWidth.priority = UILayoutPriorityRequired - 1;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.centerXAnchor],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:22],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-22],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:28],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-28],
+        stackWidth,
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:640],
+    ]];
+
+    UILabel *title = [UILabel new];
+    title.text = @"Roblox Studio on iPad";
+    title.textColor = UIColor.whiteColor;
+    title.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
+    title.numberOfLines = 0;
+    [stack addArrangedSubview:title];
+
+    UILabel *subtitle = [UILabel new];
+    subtitle.textColor = [UIColor colorWithWhite:0.82 alpha:1];
+    subtitle.font = [UIFont systemFontOfSize:16];
+    subtitle.numberOfLines = 0;
+    [stack addArrangedSubview:subtitle];
+    if (self.studioVersion) {
+        subtitle.text = [NSString stringWithFormat:
+            @"Download the official Roblox Studio Mac package for version %@. StudPad keeps the iOS-compatible engine here and fetches the matching Studio resources from Roblox's CDN.",
+            self.studioVersion];
+    } else {
+        subtitle.text = @"This build is missing its pinned Roblox Studio download manifest. Install a fresh build from the latest workflow run.";
+    }
+
+    gStatusLabel = [UILabel new];
+    gStatusLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    gStatusLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    gStatusLabel.numberOfLines = 0;
+    [stack addArrangedSubview:gStatusLabel];
+
+    gCrashLabel = [UILabel new];
+    gCrashLabel.textColor = [UIColor colorWithRed:1 green:0.58 blue:0.46 alpha:1];
+    gCrashLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    gCrashLabel.numberOfLines = 0;
+    gCrashLabel.hidden = YES;
+    [stack addArrangedSubview:gCrashLabel];
+
+    gProgressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    gProgressView.progressTintColor = [UIColor colorWithRed:0.2 green:0.72 blue:0.52 alpha:1];
+    gProgressView.hidden = YES;
+    [stack addArrangedSubview:gProgressView];
+
+    gProgressLabel = [UILabel new];
+    gProgressLabel.textColor = [UIColor colorWithWhite:0.72 alpha:1];
+    gProgressLabel.font = [UIFont systemFontOfSize:13];
+    gProgressLabel.numberOfLines = 0;
+    gProgressLabel.hidden = YES;
+    [stack addArrangedSubview:gProgressLabel];
+
+    gDownloadButton = [self buttonWithTitle:@"Download Studio from Roblox" selector:@selector(downloadStudio:) primary:YES];
+    [stack addArrangedSubview:gDownloadButton];
+    gLaunchButton = [self buttonWithTitle:@"Open Roblox Studio" selector:@selector(launchStudio:) primary:YES];
+    [stack addArrangedSubview:gLaunchButton];
+    [stack addArrangedSubview:[self buttonWithTitle:@"Share log with developer" selector:@selector(shareLog:) primary:NO]];
+
+    UILabel *setupHeading = [UILabel new];
+    setupHeading.text = @"Optional setup";
+    setupHeading.textColor = UIColor.whiteColor;
+    setupHeading.font = [UIFont systemFontOfSize:19 weight:UIFontWeightSemibold];
+    [stack addArrangedSubview:setupHeading];
+
+    gMemoryStatusLabel = [UILabel new];
+    gMemoryStatusLabel.textColor = [UIColor colorWithWhite:0.82 alpha:1];
+    gMemoryStatusLabel.font = [UIFont systemFontOfSize:14];
+    gMemoryStatusLabel.numberOfLines = 0;
+    [stack addArrangedSubview:gMemoryStatusLabel];
+    [stack addArrangedSubview:[self buttonWithTitle:@"Set up GetMoreRam" selector:@selector(showGetMoreRam:) primary:NO]];
+
+    gJitStatusLabel = [UILabel new];
+    gJitStatusLabel.textColor = [UIColor colorWithWhite:0.82 alpha:1];
+    gJitStatusLabel.font = [UIFont systemFontOfSize:14];
+    gJitStatusLabel.numberOfLines = 0;
+    [stack addArrangedSubview:gJitStatusLabel];
+    [stack addArrangedSubview:[self buttonWithTitle:@"Enable JIT with StikDebug" selector:@selector(showStikDebug:) primary:NO]];
+
+    UILabel *note = [UILabel new];
+    note.text = @"JIT is optional for this Studio build. The checker reads iOS's CS_DEBUGGED process flag; a successful memory mapping alone does not prove JIT is enabled.";
+    note.textColor = [UIColor colorWithWhite:0.65 alpha:1];
+    note.font = [UIFont systemFontOfSize:13];
+    note.numberOfLines = 0;
+    [stack addArrangedSubview:note];
 
     studpad_set_log_hook(host_log);
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(studpadDidBecomeActive:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+    [self refreshSetupStatus];
+    [self updateCrashBanner];
+    studpad_log("Setup view loaded");
+}
+
+- (UIButton *)buttonWithTitle:(NSString *)title selector:(SEL)selector primary:(BOOL)primary {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.backgroundColor = primary
+        ? [UIColor colorWithRed:0.12 green:0.62 blue:0.43 alpha:1]
+        : [UIColor colorWithWhite:0.18 alpha:1];
+    button.layer.cornerRadius = 10;
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    button.titleLabel.numberOfLines = 0;
+    button.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    button.titleLabel.textAlignment = NSTextAlignmentCenter;
+    [button.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+    [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (void)refreshSetupStatus {
+    BOOL ready = self.studioVersion && [self studioContentIsReady];
+    if (!self.packageManifest) {
+        gStatusLabel.text = @"Download information is missing. Install a new StudPad build.";
+        gDownloadButton.hidden = YES;
+        gLaunchButton.hidden = YES;
+    } else if (ready) {
+        unsigned long long bytes = [self.packageManifest[@"resource_bytes"] unsignedLongLongValue];
+        gStatusLabel.text = [NSString stringWithFormat:@"Studio %@ is ready. %@ of assets are stored on this iPad.",
+            self.studioVersion, [NSByteCountFormatter stringFromByteCount:(long long)bytes countStyle:NSByteCountFormatterCountStyleFile]];
+        gDownloadButton.hidden = YES;
+        gLaunchButton.hidden = NO;
+    } else {
+        unsigned long long bytes = [self.packageManifest[@"package_bytes"] unsignedLongLongValue];
+        gStatusLabel.text = [NSString stringWithFormat:@"The first download is %@. Keep StudPad open while it downloads and installs the Studio resources.",
+            [NSByteCountFormatter stringFromByteCount:(long long)bytes countStyle:NSByteCountFormatterCountStyleFile]];
+        gDownloadButton.hidden = NO;
+        gLaunchButton.hidden = YES;
+    }
+
+    gMemoryStatusLabel.text = studpad_increased_memory_enabled()
+        ? @"GetMoreRam check: ACTIVE. This install has the Increased Memory Limit entitlement."
+        : @"GetMoreRam check: NOT ACTIVE. Add Increased Memory Limit to this app in GetMoreRam, then refresh or reinstall StudPad in SideStore.";
+    int jitEnabled = studpad_jit_enabled();
+    gJitStatusLabel.text = jitEnabled == 1
+        ? @"JIT check: ENABLED. iOS reports CS_DEBUGGED for StudPad (the same process flag Henge checks)."
+        : jitEnabled == 0
+            ? @"JIT check: NOT DETECTED. StikDebug has not marked this StudPad process; use its per-app Enable JIT action/script."
+            : @"JIT check: UNKNOWN. iOS did not provide the CS_DEBUGGED process status.";
+}
+
+- (void)downloadStudio:(UIButton *)sender {
+    (void)sender;
+    if (!self.packageURL || !self.packageManifest) return;
+    gDownloadButton.enabled = NO;
+    gProgressView.hidden = NO;
+    gProgressLabel.hidden = NO;
+    gProgressLabel.text = @"Connecting to Roblox…";
+    gProgressView.progress = 0;
+    gStatusLabel.text = @"Downloading the version-pinned Roblox Studio package…";
+    self.downloadedZipURL = nil;
+    self.downloadFailure = nil;
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+    configuration.timeoutIntervalForRequest = 60;
+    configuration.timeoutIntervalForResource = 60 * 60;
+    self.downloadSession = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
+    NSURLSessionDownloadTask *task = [self.downloadSession downloadTaskWithURL:self.packageURL];
+    [task resume];
+}
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
+ didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten
+ totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
+    (void)session;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        int64_t total = totalBytesExpectedToWrite > 0
+            ? totalBytesExpectedToWrite : [self.packageManifest[@"package_bytes"] longLongValue];
+        gProgressView.progress = total > 0 ? (float)totalBytesWritten / (float)total : 0;
+        gProgressLabel.text = [NSString stringWithFormat:@"%@ of %@",
+            [NSByteCountFormatter stringFromByteCount:totalBytesWritten countStyle:NSByteCountFormatterCountStyleFile],
+            [NSByteCountFormatter stringFromByteCount:total countStyle:NSByteCountFormatterCountStyleFile]];
+    });
+    (void)bytesWritten;
+    (void)downloadTask;
+}
+
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
+ didFinishDownloadingToURL:(NSURL *)location {
+    (void)session;
+    NSHTTPURLResponse *response = (NSHTTPURLResponse *)downloadTask.response;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        self.downloadFailure = [NSString stringWithFormat:@"Roblox CDN returned HTTP %ld.", (long)response.statusCode];
+        return;
+    }
+    NSURL *destination = [[self supportRoot] URLByAppendingPathComponent:@"studio-package.zip"];
+    [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+    NSError *error = nil;
+    if (![[NSFileManager defaultManager] moveItemAtURL:location toURL:destination error:&error]) {
+        self.downloadFailure = error.localizedDescription ?: @"Could not save the download.";
+        return;
+    }
+    self.downloadedZipURL = destination;
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+ didCompleteWithError:(NSError *)error {
+    (void)session;
+    (void)task;
+    NSURL *archive = self.downloadedZipURL;
+    NSString *failure = self.downloadFailure;
+    self.downloadedZipURL = nil;
+    self.downloadFailure = nil;
+    if (error || failure || !archive) {
+        NSString *message = failure ?: error.localizedDescription ?: @"The download did not finish.";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.downloadSession = nil;
+            gDownloadButton.enabled = YES;
+            gStatusLabel.text = [@"Download failed: " stringByAppendingString:message];
+            gProgressView.hidden = YES;
+            gProgressLabel.hidden = YES;
+        });
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gProgressView.progress = 1;
+        gProgressLabel.text = @"Checking the package checksum and installing Studio resources…";
+        gStatusLabel.text = @"Installing Studio resources. This can take a few minutes.";
+        gDownloadButton.enabled = NO;
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *installError = nil;
+        unsigned long long expectedBytes = [self.packageManifest[@"package_bytes"] unsignedLongLongValue];
+        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:archive.path error:&installError];
+        unsigned long long actualBytes = [attributes[NSFileSize] unsignedLongLongValue];
+        NSString *expectedHash = [self.packageManifest[@"package_sha256"] lowercaseString];
+        NSString *actualHash = [self sha256ForFile:archive error:&installError];
+        if (!installError && (actualBytes != expectedBytes || ![actualHash isEqualToString:expectedHash])) {
+            installError = [NSError errorWithDomain:@"StudPadDownload" code:1
+                userInfo:@{NSLocalizedDescriptionKey:@"The downloaded Studio package did not match the build's pinned size and SHA-256."}];
+        }
+
+        NSURL *root = [self supportRoot];
+        NSURL *staging = [root URLByAppendingPathComponent:@"studio-content.partial" isDirectory:YES];
+        [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
+        [[NSFileManager defaultManager] createDirectoryAtURL:staging
+                                withIntermediateDirectories:YES attributes:nil error:&installError];
+        char zipError[512] = {0};
+        if (!installError && studpad_extract_resources_zip(
+                archive.fileSystemRepresentation, staging.fileSystemRepresentation,
+                [self.packageManifest[@"app_bundle_name"] UTF8String], zipError, sizeof(zipError)) != 0) {
+            installError = [NSError errorWithDomain:@"StudPadDownload" code:2
+                userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithUTF8String:zipError] ?: @"Could not extract Studio resources."}];
+        }
+
+        if (!installError) {
+            NSURL *resources = [self resourcesURL];
+            NSURL *parent = resources.URLByDeletingLastPathComponent;
+            [[NSFileManager defaultManager] createDirectoryAtURL:parent
+                                    withIntermediateDirectories:YES attributes:nil error:&installError];
+            if (!installError) {
+                [[NSFileManager defaultManager] removeItemAtURL:resources error:nil];
+                if (![[NSFileManager defaultManager] moveItemAtURL:staging toURL:resources error:&installError]) {
+                    installError = installError ?: [NSError errorWithDomain:@"StudPadDownload" code:3
+                        userInfo:@{NSLocalizedDescriptionKey:@"Could not install Studio resources."}];
+                }
+            }
+        }
+        if (!installError) {
+            NSString *versionPath = [[root URLByAppendingPathComponent:@"studio-content.version"] path];
+            NSError *writeError = nil;
+            [self.studioVersion writeToFile:versionPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
+            installError = writeError;
+        }
+
+        [[NSFileManager defaultManager] removeItemAtURL:archive error:nil];
+        if (installError) [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.downloadSession = nil;
+            gDownloadButton.enabled = YES;
+            gProgressView.hidden = YES;
+            gProgressLabel.hidden = YES;
+            if (installError) {
+                studpad_log("Studio setup failed: %s",
+                            installError.localizedDescription.UTF8String ?: "unknown error");
+                gStatusLabel.text = [@"Studio setup failed: " stringByAppendingString:installError.localizedDescription];
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Studio setup failed"
+                    message:installError.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            } else {
+                gStatusLabel.text = @"Studio resources are ready.";
+                [self refreshSetupStatus];
+            }
+        });
+    });
+}
+
+- (NSString *)sha256ForFile:(NSURL *)url error:(NSError **)error {
+    char digest[STUDPAD_SHA256_HEX_LENGTH];
+    if (studpad_sha256_file(url.fileSystemRepresentation, digest) != 0) {
+        int code = errno ? errno : EIO;
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:code
+            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:
+                @"Could not hash the downloaded Studio package: %s", strerror(code)]}];
+        return nil;
+    }
+    return [NSString stringWithUTF8String:digest];
+}
+
+- (NSString *)crashReportPath {
+    const char *path = studpad_crash_flag_path();
+    return path ? [NSString stringWithUTF8String:path] : nil;
+}
+
+- (void)updateCrashBanner {
+    NSString *path = [self crashReportPath];
+    NSString *report = path ? [NSString stringWithContentsOfFile:path
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:nil] : nil;
+    report = [report stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (report.length == 0) {
+        gCrashLabel.text = nil;
+        gCrashLabel.hidden = YES;
+        return;
+    }
+    NSString *firstLine = [[report componentsSeparatedByCharactersInSet:
+        NSCharacterSet.newlineCharacterSet] firstObject] ?: @"";
+    if (firstLine.length > 140) {
+        firstLine = [[firstLine substringToIndex:140] stringByAppendingString:@"..."];
+    }
+    gCrashLabel.text = [NSString stringWithFormat:
+        @"Studio crashed on the previous launch: %@ Tap Share log with developer and send studio.log plus last-crash.txt.",
+        firstLine];
+    gCrashLabel.hidden = NO;
+}
+
+- (void)shareLog:(UIButton *)sender {
+    NSMutableArray<NSURL *> *items = [NSMutableArray array];
+    const char *logPath = studpad_log_path_c();
+    if (logPath && *logPath) {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:logPath]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) [items addObject:url];
+    }
+    NSString *crashPath = [self crashReportPath];
+    if (crashPath && [[NSFileManager defaultManager] fileExistsAtPath:crashPath]) {
+        [items addObject:[NSURL fileURLWithPath:crashPath]];
+    }
+    if (items.count == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No log yet"
+            message:@"StudPad has not written a log on this launch. Open Studio once, then try again."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    UIActivityViewController *activity =
+        [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
+    activity.popoverPresentationController.sourceView = sender ?: self.view;
+    activity.popoverPresentationController.sourceRect = sender ? sender.bounds : self.view.bounds;
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
+- (void)launchStudio:(UIButton *)sender {
+    (void)sender;
+    if (![self studioContentIsReady]) {
+        [self refreshSetupStatus];
+        return;
+    }
+
+    NSString *bundle = NSBundle.mainBundle.bundlePath;
+    NSString *guest = [bundle stringByAppendingPathComponent:@"Frameworks/StudioKit"];
+    NSURL *launchDirectory = [[[self resourcesURL] URLByDeletingLastPathComponent]
+        URLByAppendingPathComponent:@"MacOS" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:launchDirectory
+                            withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *launchPath = [launchDirectory URLByAppendingPathComponent:@"RobloxStudio"].path;
+    unlink(launchPath.fileSystemRepresentation);
+    if (symlink(guest.fileSystemRepresentation, launchPath.fileSystemRepresentation) != 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Could not prepare Studio"
+            message:[NSString stringWithFormat:@"Could not prepare the Studio launch path: %s", strerror(errno)]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    studpad_set_studio_launch_path(launchPath.fileSystemRepresentation);
+    studpad_log("Host is launching Studio: %s", launchPath.fileSystemRepresentation);
+
+    gSetupView.hidden = YES;
+    gStudioHost.hidden = NO;
+    gLogView.hidden = NO;
+    [gSpinner startAnimating];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        studpad_guest_start();
+    });
+}
+
+- (void)showGetMoreRam:(UIButton *)sender {
+    (void)sender;
+    NSString *message = @"GetMoreRam adds the memory capability to the Apple ID's app profile. Use the same Apple ID as SideStore, refresh App IDs, select com.kuywoh.studpadstudio, add Increased Memory Limit, then refresh or reinstall StudPad in SideStore. The change cannot be applied from inside StudPad.";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Set up GetMoreRam"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Open GetMoreRam" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self openURL:[NSURL URLWithString:@"https://github.com/hugeBlack/GetMoreRam"] failureMessage:@"GetMoreRam could not be opened."];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showStikDebug:(UIButton *)sender {
+    (void)sender;
+    NSString *message = @"Install and pair StikDebug first. On iOS 26+, set up its pairing and LocalDevVPN, then assign StikDebug's universal.js script to StudPad. Tap Continue to ask StikDebug to enable JIT for this running process. JIT is optional for the current Studio build.";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Enable JIT with StikDebug"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Continue to StikDebug" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:@"stikjit://enable-jit"];
+        components.queryItems = @[
+            [NSURLQueryItem queryItemWithName:@"bundle-id" value:NSBundle.mainBundle.bundleIdentifier ?: @"com.kuywoh.studpadstudio"],
+            [NSURLQueryItem queryItemWithName:@"pid" value:[NSString stringWithFormat:@"%d", getpid()]],
+        ];
+        [self openURL:components.URL failureMessage:@"StikDebug did not open. Install and pair it, then try again."];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"StikDebug setup guide" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self openURL:[NSURL URLWithString:@"https://github.com/StikDebug/StikDebug"] failureMessage:@"Could not open the StikDebug guide."];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)openURL:(NSURL *)url failureMessage:(NSString *)message {
+    if (!url) return;
+    [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
+        if (!success) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Could not open"
+                    message:message preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+        }
+    }];
+}
+
+- (void)toggleLogPanel:(UIButton *)sender {
+    gLogView.hidden = !gLogView.hidden;
+    [sender setTitle:gLogView.hidden ? @"Logs" : @"Hide log" forState:UIControlStateNormal];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     studpad_host_ready((__bridge void *)gStudioHost, (__bridge void *)gSpinner);
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        // A beat for the first frame, then Studio owns the main thread. It pumps the main run loop
-        // from the shim whenever it waits, which is what keeps the view updating.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-                           studpad_guest_start();
-                       });
-    });
+    if (!gSetupView) return;
+    [self refreshSetupStatus];
+    [self updateCrashBanner];
+}
+
+- (void)studpadDidBecomeActive:(NSNotification *)notification {
+    (void)notification;
+    [self refreshSetupStatus];
 }
 
 - (BOOL)prefersStatusBarHidden { return YES; }
@@ -113,6 +785,14 @@ static void crash_signal(int sig) {
 @end
 
 @implementation StudPadAppDelegate
+- (BOOL)application:(UIApplication *)application
+        didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)launchOptions {
+    (void)application;
+    (void)launchOptions;
+    NSString *build = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"];
+    studpad_log("StudPad build %s launched", build.UTF8String ?: "unknown");
+    return YES;
+}
 @end
 
 @interface StudPadSceneDelegate : UIResponder <UIWindowSceneDelegate>
@@ -127,6 +807,7 @@ static void crash_signal(int sig) {
     (void)session;
     (void)connectionOptions;
     UIWindowScene *windowScene = (UIWindowScene *)scene;
+    studpad_log("Scene connected: %s", NSStringFromClass(windowScene.class).UTF8String ?: "UIWindowScene");
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
     self.window.rootViewController = [StudPadViewController new];
     [self.window makeKeyAndVisible];
@@ -135,18 +816,34 @@ static void crash_signal(int sig) {
 @end
 
 static void uncaught_exception(NSException *exception) {
-    NSString *text = [NSString stringWithFormat:@"NSException %@: %@\n%@", exception.name,
-                                                exception.reason,
-                                                exception.callStackSymbols.description];
+    NSString *text = [NSString stringWithFormat:@"NSException %@: %@\n%@",
+                      exception.name, exception.reason, exception.callStackSymbols.description];
+    const char *crashPath = studpad_crash_flag_path();
+    if (crashPath) {
+        [text writeToFile:[NSString stringWithUTF8String:crashPath]
+               atomically:YES
+                 encoding:NSUTF8StringEncoding
+                    error:nil];
+    }
+    studpad_log("%s", text.UTF8String ?: "NSException");
     host_log(text.UTF8String);
 }
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        // Resolve and create the log directory before the guest runs, so the crash handler never has
+        // to enter Foundation for the first time inside a signal.
+        (void)studpad_log_path_c();
+        studpad_log("StudPad main entered (pid %d)", getpid());
         NSSetUncaughtExceptionHandler(uncaught_exception);
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = crash_signal;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
         for (int sig = 1; sig < NSIG; sig++) {
             if (sig == SIGKILL || sig == SIGSTOP || sig == SIGCONT) continue;
-            signal(sig, crash_signal);
+            sigaction(sig, &action, NULL);
         }
         return UIApplicationMain(argc, argv, nil, @"StudPadAppDelegate");
     }

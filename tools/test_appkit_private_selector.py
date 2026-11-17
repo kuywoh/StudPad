@@ -28,7 +28,7 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
             encoding="utf-8"
         )
         start = source.index("@implementation NSApplication")
-        end = source.index("\\n@end", start)
+        end = source.index("\n@end", start)
         implementation = source[start:end]
 
         self.assertIn("id _msEffectiveAppearance;", source)

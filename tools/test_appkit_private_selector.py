@@ -75,6 +75,7 @@ class MSColorCompatibilityTests(unittest.TestCase):
         end = source.index("\n@end", start)
         implementation = source[start:end]
 
+        self.assertIn("- (NSInteger)type { return 0; }", implementation)
         self.assertIn("- (id)patternImage { return nil; }", implementation)
 
 

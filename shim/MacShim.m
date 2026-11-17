@@ -359,9 +359,9 @@ static id ms_return_self(id self, SEL _cmd) { (void)_cmd; return self; }
     return self;
 }
 
-// Catalog sends Qt down the generic conversion path below. Its componentBased branch compares
-// against NSColorSpace singletons this shim cannot reproduce, so it must not be taken.
-- (NSInteger)type { return 2; }
+// These wrappers contain solid UIKit colors. Report component-based so Qt never treats
+// them as image patterns and sends a nil patternImage to its renderer.
+- (NSInteger)type { return 0; }
 - (NSString *)className { return @"NSColor"; }
 - (NSString *)catalogNameComponent { return @"Shim"; }
 - (NSString *)colorNameComponent { return @"shim"; }

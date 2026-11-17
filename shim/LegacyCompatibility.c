@@ -42,6 +42,12 @@ CGSize CGDisplayScreenSize(uint32_t display) {
     return CGSizeZero;
 }
 
+// Returns CGFloat/double in d0, which a `void *` stub never fills.
+double CGDisplayModeGetRefreshRate(void *mode) {
+    (void)mode;
+    return 0.0;
+}
+
 CGPoint CGEventGetLocation(void *event) {
     (void)event;
     return CGPointZero;
@@ -104,4 +110,15 @@ CGRect *HIShapeGetBounds(void *shape, CGRect *bounds) {
     if (!bounds) return NULL;
     *bounds = CGRectZero;
     return bounds;
+}
+
+// Both return a paper dimension in points as a double, not a pointer.
+double PMPaperGetHeight(void *paper) {
+    (void)paper;
+    return 0.0;
+}
+
+double PMPaperGetWidth(void *paper) {
+    (void)paper;
+    return 0.0;
 }

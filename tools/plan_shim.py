@@ -125,6 +125,7 @@ TYPED_DATA_SYMBOLS = {
 
 UNSAFE_ABI_SYMBOLS = {
     "_CGDisplayBounds": "shim/LegacyCompatibility.c",
+    "_CGDisplayModeGetRefreshRate": "shim/LegacyCompatibility.c",
     "_CGDisplayScreenSize": "shim/LegacyCompatibility.c",
     "_CGEventGetLocation": "shim/LegacyCompatibility.c",
     "_CGGetDisplaysWithRect": "shim/LegacyCompatibility.c",
@@ -134,6 +135,8 @@ UNSAFE_ABI_SYMBOLS = {
     "_CVDisplayLinkStart": "shim/LegacyCompatibility.c",
     "_CVDisplayLinkStop": "shim/LegacyCompatibility.c",
     "_HIShapeGetBounds": "shim/LegacyCompatibility.c",
+    "_PMPaperGetHeight": "shim/LegacyCompatibility.c",
+    "_PMPaperGetWidth": "shim/LegacyCompatibility.c",
 }
 TYPED_SHIM_SYMBOLS = {**TYPED_DATA_SYMBOLS, **UNSAFE_ABI_SYMBOLS}
 

@@ -116,6 +116,19 @@ class StatusStubTests(unittest.TestCase):
         self.assertIn("return -1;", contents)
         self.assertNotIn(f"void *{symbol[1:]}(void)", contents)
 
+    def test_every_curated_status_symbol_is_a_c_identifier(self):
+        symbols = sorted(STATUS_RETURN_SYMBOLS)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "stubs.c"
+            write_c_stubs(self._groups(symbols), str(output))
+            contents = output.read_text(encoding="utf-8")
+
+        for symbol in symbols:
+            with self.subTest(symbol=symbol):
+                self.assertIn(f"int32_t {symbol[1:]}(void)", contents)
+        self.assertNotIn("void *", contents)
+        self.assertEqual(contents.count("return -1;"), len(symbols))
+
     def test_other_functions_still_get_pointer_stubs(self):
         symbol = "_CGDisplayCopyDisplayMode"
         with tempfile.TemporaryDirectory() as directory:

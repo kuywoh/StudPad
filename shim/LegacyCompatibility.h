@@ -45,6 +45,7 @@ extern const CFStringRef kUTTagClassOSType;
 // CGRect/CGSize/CGPoint return, and leaves output pointers untouched even when it reports success.
 CGRect CGDisplayBounds(uint32_t display);
 CGSize CGDisplayScreenSize(uint32_t display);
+double CGDisplayModeGetRefreshRate(void *mode);
 CGPoint CGEventGetLocation(void *event);
 CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays, uint32_t *displays,
                               uint32_t *count);
@@ -56,6 +57,8 @@ int32_t CVDisplayLinkStop(void *displayLink);
 uint32_t CVDisplayLinkIsRunning(void *displayLink);
 void CVDisplayLinkRelease(void *displayLink);
 CGRect *HIShapeGetBounds(void *shape, CGRect *bounds);
+double PMPaperGetHeight(void *paper);
+double PMPaperGetWidth(void *paper);
 
 #ifdef __cplusplus
 }

@@ -41,6 +41,9 @@ int main(void) {
     assert(CGSizeEqualToSize(size, CGSizeZero));
     CGPoint point = CGEventGetLocation(NULL);
     assert(CGPointEqualToPoint(point, CGPointZero));
+    assert(CGDisplayModeGetRefreshRate(NULL) == 0.0);
+    assert(PMPaperGetHeight(NULL) == 0.0);
+    assert(PMPaperGetWidth(NULL) == 0.0);
 
     uint32_t displays[4] = {42, 42, 42, 42};
     uint32_t count = 42;

@@ -58,16 +58,34 @@ static NSString *studpad_log_path(void) {
     static NSString *path = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask,
-                                                             YES).firstObject;
-        path = [docs stringByAppendingPathComponent:@"studio.log"];
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSString *directory = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                                 NSUserDomainMask, YES).firstObject;
+        // A fresh install does not always have Documents. Without it open() failed with ENOENT and
+        // every log line was dropped, which is why a crash left no evidence behind.
+        if (directory.length == 0) {
+            const char *home = getenv("HOME");
+            if (home && *home) {
+                directory = [[NSString stringWithUTF8String:home]
+                    stringByAppendingPathComponent:@"Documents"];
+            }
+        }
+        if (directory.length == 0) directory = NSTemporaryDirectory();
+        [manager createDirectoryAtPath:directory
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:nil];
+        path = [directory stringByAppendingPathComponent:@"studio.log"];
     });
-    return path;
+    return path ?: @"";
 }
 
 static void studpad_open_log(void) {
     if (gLogFd >= 0) return;
-    gLogFd = open(studpad_log_path().fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    NSString *logPath = studpad_log_path();
+    [[NSFileManager defaultManager] createDirectoryAtPath:logPath.stringByDeletingLastPathComponent
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    gLogFd = open(logPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (gLogFd >= 0) {
         dup2(gLogFd, STDOUT_FILENO);
         dup2(gLogFd, STDERR_FILENO);
@@ -165,7 +183,35 @@ CFDataRef studpad_copy_file_data(const char *path) {
 // MSStubObject
 // ---------------------------------------------------------------------------------------------
 
-static void ms_zero_imp(id self, SEL _cmd) { (void)self; (void)_cmd; }
+// An unknown selector has no compiled method type at runtime, so the stub cannot know whether the
+// caller expects an object, a BOOL, an integer or a struct. A plain `void` C function leaves the
+// receiver in x0, which means -[NSSomething unknownObjectReturn] answers `self` and a struct-return
+// call reads garbage. Zero the return registers the AArch64 ABI uses: x0-x7 and d0-d7 cover object,
+// integer, pointer, CGRect/NSSize/NSPoint/NSRange and float/double returns.
+#if defined(__arm64__)
+__attribute__((naked)) static void ms_zero_return_imp(void) {
+    __asm__ volatile(
+        "mov x0, xzr\n\t"
+        "mov x1, xzr\n\t"
+        "mov x2, xzr\n\t"
+        "mov x3, xzr\n\t"
+        "mov x4, xzr\n\t"
+        "mov x5, xzr\n\t"
+        "mov x6, xzr\n\t"
+        "mov x7, xzr\n\t"
+        "fmov d0, xzr\n\t"
+        "fmov d1, xzr\n\t"
+        "fmov d2, xzr\n\t"
+        "fmov d3, xzr\n\t"
+        "fmov d4, xzr\n\t"
+        "fmov d5, xzr\n\t"
+        "fmov d6, xzr\n\t"
+        "fmov d7, xzr\n\t"
+        "ret\n\t");
+}
+#else
+static void ms_zero_return_imp(void) {}
+#endif
 
 // Some Studio builds send legacy Foundation file-loading selectors that are not implemented
 // by the iOS Foundation classes. Use the CFData reader above, then parse standard property lists.
@@ -242,7 +288,7 @@ static void ms_install_appkit_colors(void);
     studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(self), sel_getName(sel));
     if (isClass ? class_getClassMethod(self, sel) : class_getInstanceMethod(self, sel)) return NO;
     Class target = isClass ? object_getClass(self) : self;
-    return class_addMethod(target, sel, (IMP)ms_zero_imp, "v@:");
+    return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "v@:");
 }
 
 + (BOOL)resolveInstanceMethod:(SEL)sel { return [self ms_claim:sel isClass:NO]; }

@@ -11,7 +11,9 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -34,6 +36,58 @@ static UILabel *gProgressLabel;
 static UIProgressView *gProgressView;
 static UIButton *gDownloadButton;
 static UIButton *gLaunchButton;
+static UILabel *gCrashLabel;
+
+// iOS does not always pre-create Documents, and without it every log write below silently fails.
+// Create it from a C constructor so the directory and the early breadcrumb exist even if the app
+// dies before UIApplicationMain returns.
+static const char *studpad_documents_dir(void) {
+    static char path[PATH_MAX];
+    static int ready;
+    if (!ready) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            int written = snprintf(path, sizeof path, "%s/Documents", home);
+            if (written > 0 && (size_t)written < sizeof path) mkdir(path, 0700);
+            else path[0] = '\0';
+        }
+        ready = 1;
+    }
+    return path[0] ? path : NULL;
+}
+
+static const char *studpad_crash_flag_path(void) {
+    static char path[PATH_MAX];
+    static int ready;
+    if (!ready) {
+        const char *docs = studpad_documents_dir();
+        if (docs) {
+            int written = snprintf(path, sizeof path, "%s/last-crash.txt", docs);
+            if (written <= 0 || (size_t)written >= sizeof path) path[0] = '\0';
+        }
+        ready = 1;
+    }
+    return path[0] ? path : NULL;
+}
+
+__attribute__((constructor)) static void studpad_early_launch_breadcrumb(void) {
+    const char *docs = studpad_documents_dir();
+    if (!docs) return;
+    char path[PATH_MAX];
+    int written = snprintf(path, sizeof path, "%s/studio.log", docs);
+    if (written <= 0 || (size_t)written >= sizeof path) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    char line[192];
+    int length = snprintf(line, sizeof line,
+                          "=== StudPad host initializers ran (pid %d) ===\n", getpid());
+    if (length > 0) {
+        ssize_t ignored = write(fd, line, (size_t)length);
+        (void)ignored;
+    }
+    fsync(fd);
+    close(fd);
+}
 
 static NSDictionary *read_dictionary_plist(NSString *path) {
     if (path.length == 0) return nil;
@@ -70,7 +124,22 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     char head[192];
     snprintf(head, sizeof head, "\n=== signal %d (%s), address %p ===\n", sig, name ? name : "?",
              info ? info->si_addr : NULL);
+
     int fd = open(studpad_log_path_c(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int flag = -1;
+    const char *flagPath = studpad_crash_flag_path();
+    if (flagPath) flag = open(flagPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (flag >= 0) {
+        ssize_t ignored = write(flag, head, strlen(head));
+        const char *logPath = studpad_log_path_c();
+        if (logPath && *logPath) {
+            char line[PATH_MAX + 32];
+            int length = snprintf(line, sizeof line, "full log: %s\n", logPath);
+            if (length > 0) ignored = write(flag, line, (size_t)length);
+        }
+        (void)ignored;
+    }
+
     if (fd >= 0) {
         ssize_t ignored = write(fd, head, strlen(head));
         // The backtrace only resolves exported symbols, so an abort inside a static helper (Qt's
@@ -93,13 +162,26 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
                      (unsigned long long)uc->uc_mcontext->__ss.__lr,
                      (unsigned long long)uc->uc_mcontext->__ss.__sp);
             ignored = write(fd, regs, strlen(regs));
+            if (flag >= 0) ignored = write(flag, regs, strlen(regs));
         }
 #endif
-        void *frames[80];
-        int count = backtrace(frames, 80);
-        backtrace_symbols_fd(frames, count, fd);
+        (void)ignored;
+    }
+
+    void *frames[80];
+    int count = backtrace(frames, 80);
+    if (fd >= 0) backtrace_symbols_fd(frames, count, fd);
+    if (flag >= 0) {
+        backtrace_symbols_fd(frames, count, flag);
         const char tail[] = "=== end ===\n";
-        ignored = write(fd, tail, sizeof tail - 1);
+        ssize_t ignored = write(flag, tail, sizeof tail - 1);
+        (void)ignored;
+        fsync(flag);
+        close(flag);
+    }
+    if (fd >= 0) {
+        const char tail[] = "=== end ===\n";
+        ssize_t ignored = write(fd, tail, sizeof tail - 1);
         (void)ignored;
         fsync(fd);
         close(fd);
@@ -269,6 +351,13 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     gStatusLabel.numberOfLines = 0;
     [stack addArrangedSubview:gStatusLabel];
 
+    gCrashLabel = [UILabel new];
+    gCrashLabel.textColor = [UIColor colorWithRed:1 green:0.58 blue:0.46 alpha:1];
+    gCrashLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    gCrashLabel.numberOfLines = 0;
+    gCrashLabel.hidden = YES;
+    [stack addArrangedSubview:gCrashLabel];
+
     gProgressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     gProgressView.progressTintColor = [UIColor colorWithRed:0.2 green:0.72 blue:0.52 alpha:1];
     gProgressView.hidden = YES;
@@ -285,6 +374,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     [stack addArrangedSubview:gDownloadButton];
     gLaunchButton = [self buttonWithTitle:@"Open Roblox Studio" selector:@selector(launchStudio:) primary:YES];
     [stack addArrangedSubview:gLaunchButton];
+    [stack addArrangedSubview:[self buttonWithTitle:@"Share log with developer" selector:@selector(shareLog:) primary:NO]];
 
     UILabel *setupHeading = [UILabel new];
     setupHeading.text = @"Optional setup";
@@ -319,6 +409,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
     [self refreshSetupStatus];
+    [self updateCrashBanner];
 }
 
 - (UIButton *)buttonWithTitle:(NSString *)title selector:(SEL)selector primary:(BOOL)primary {
@@ -530,6 +621,59 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     return [NSString stringWithUTF8String:digest];
 }
 
+- (NSString *)crashReportPath {
+    const char *path = studpad_crash_flag_path();
+    return path ? [NSString stringWithUTF8String:path] : nil;
+}
+
+- (void)updateCrashBanner {
+    NSString *path = [self crashReportPath];
+    NSString *report = path ? [NSString stringWithContentsOfFile:path
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:nil] : nil;
+    report = [report stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (report.length == 0) {
+        gCrashLabel.text = nil;
+        gCrashLabel.hidden = YES;
+        return;
+    }
+    NSString *firstLine = [[report componentsSeparatedByCharactersInSet:
+        NSCharacterSet.newlineCharacterSet] firstObject] ?: @"";
+    if (firstLine.length > 140) {
+        firstLine = [[firstLine substringToIndex:140] stringByAppendingString:@"..."];
+    }
+    gCrashLabel.text = [NSString stringWithFormat:
+        @"Studio crashed on the previous launch: %@ Tap Share log with developer and send studio.log plus last-crash.txt.",
+        firstLine];
+    gCrashLabel.hidden = NO;
+}
+
+- (void)shareLog:(UIButton *)sender {
+    NSMutableArray<NSURL *> *items = [NSMutableArray array];
+    const char *logPath = studpad_log_path_c();
+    if (logPath && *logPath) {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:logPath]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) [items addObject:url];
+    }
+    NSString *crashPath = [self crashReportPath];
+    if (crashPath && [[NSFileManager defaultManager] fileExistsAtPath:crashPath]) {
+        [items addObject:[NSURL fileURLWithPath:crashPath]];
+    }
+    if (items.count == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No log yet"
+            message:@"StudPad has not written a log on this launch. Open Studio once, then try again."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    UIActivityViewController *activity =
+        [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
+    activity.popoverPresentationController.sourceView = sender ?: self.view;
+    activity.popoverPresentationController.sourceRect = sender ? sender.bounds : self.view.bounds;
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
 - (void)launchStudio:(UIButton *)sender {
     (void)sender;
     if (![self studioContentIsReady]) {
@@ -554,6 +698,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
         return;
     }
     studpad_set_studio_launch_path(launchPath.fileSystemRepresentation);
+    studpad_log("Host is launching Studio: %s", launchPath.fileSystemRepresentation);
 
     gSetupView.hidden = YES;
     gStudioHost.hidden = NO;
@@ -621,6 +766,7 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
     studpad_host_ready((__bridge void *)gStudioHost, (__bridge void *)gSpinner);
     if (!gSetupView) return;
     [self refreshSetupStatus];
+    [self updateCrashBanner];
 }
 
 - (void)studpadDidBecomeActive:(NSNotification *)notification {
@@ -669,11 +815,22 @@ static void crash_signal(int sig, siginfo_t *info, void *context) {
 static void uncaught_exception(NSException *exception) {
     NSString *text = [NSString stringWithFormat:@"NSException %@: %@\n%@",
                       exception.name, exception.reason, exception.callStackSymbols.description];
+    const char *crashPath = studpad_crash_flag_path();
+    if (crashPath) {
+        [text writeToFile:[NSString stringWithUTF8String:crashPath]
+               atomically:YES
+                 encoding:NSUTF8StringEncoding
+                    error:nil];
+    }
+    studpad_log("%s", text.UTF8String ?: "NSException");
     host_log(text.UTF8String);
 }
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        // Resolve and create the log directory before the guest runs, so the crash handler never has
+        // to enter Foundation for the first time inside a signal.
+        (void)studpad_log_path_c();
         NSSetUncaughtExceptionHandler(uncaught_exception);
         struct sigaction action;
         memset(&action, 0, sizeof action);

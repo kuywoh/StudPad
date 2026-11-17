@@ -38,5 +38,63 @@ class AppKitPrivateSelectorTests(unittest.TestCase):
         )
 
 
+class StubReturnContractTests(unittest.TestCase):
+    def test_unknown_selectors_zero_the_aarch64_return_registers(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("__attribute__((naked)) static void ms_zero_return_imp(void)", source)
+        for register in (f"x{index}" for index in range(8)):
+            self.assertIn(f'"mov {register}, xzr\\n\\t"', source)
+        for register in (f"d{index}" for index in range(8)):
+            self.assertIn(f'"fmov {register}, xzr\\n\\t"', source)
+        self.assertIn("(IMP)ms_zero_return_imp", source)
+        self.assertNotIn("(IMP)ms_zero_imp", source)
+
+    def test_log_path_creates_documents_before_the_first_write(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+
+        start = source.index("static NSString *studpad_log_path(void)")
+        end = source.index("static void studpad_open_log(void)", start)
+        log_path = source[start:end]
+        self.assertIn("createDirectoryAtPath:directory", log_path)
+        self.assertIn("withIntermediateDirectories:YES", log_path)
+
+
+class HostDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (Path(__file__).resolve().parents[1] / "app" / "starter.m").read_text(
+            encoding="utf-8"
+        )
+
+    def test_signal_handler_writes_a_crash_marker_the_next_launch_can_share(self):
+        start = self.source.index("static void crash_signal(")
+        end = self.source.index("\n}\n", self.source.index("_exit(128 + sig)", start)) + 3
+        handler = self.source[start:end]
+
+        self.assertIn("studpad_crash_flag_path()", handler)
+        self.assertIn("O_TRUNC", handler)
+        self.assertIn("backtrace_symbols_fd(frames, count, flag)", handler)
+        self.assertIn("studpad_log_path_c()", handler)
+
+    def test_host_writes_documents_before_uikit_starts(self):
+        start = self.source.index("static const char *studpad_documents_dir(void)")
+        end = self.source.index("static NSDictionary *read_dictionary_plist", start)
+        setup = self.source[start:end]
+
+        self.assertIn('"%s/Documents"', setup)
+        self.assertIn("mkdir(path, 0700)", setup)
+        self.assertIn("studio.log", setup)
+        self.assertIn("__attribute__((constructor))", setup)
+
+    def test_host_exposes_a_share_log_action(self):
+        self.assertIn("selector:@selector(shareLog:)", self.source)
+        self.assertIn("UIActivityViewController", self.source)
+        self.assertIn("popoverPresentationController.sourceRect", self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

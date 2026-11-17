@@ -66,6 +66,11 @@ first launch. Text reports are uploaded even when the build fails.
    StikDebug for the running StudPad process.
 
 Open **StudPad Studio** and read the log in Files → On My iPad → StudPad Studio → `studio.log`.
+The app creates that folder on launch, even before Studio starts. If a setup-screen build crashes
+inside Studio, launch StudPad again and tap **Share log with developer**; it shares `studio.log` and
+`last-crash.txt` (the signal, registers and backtrace from the failed launch). If Files still shows
+no folder, use Settings → Privacy & Security → Analytics & Improvements → Analytics Data → a
+`StudPadStudio-*.ips` entry, or pull `studio.log` over USB with `pymobiledevice3`/`idevicesyslog`.
 After a Studio view appears, the log panel is hidden so it does not cover the app; tap **Logs** to
 open it again. The useful lines include:
 

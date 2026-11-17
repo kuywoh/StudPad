@@ -52,6 +52,18 @@ class StubReturnContractTests(unittest.TestCase):
         self.assertIn("(IMP)ms_zero_return_imp", source)
         self.assertNotIn("(IMP)ms_zero_imp", source)
 
+    def test_nscolor_instance_resolution_does_not_cast_an_instance_to_class(self):
+        source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
+            encoding="utf-8"
+        )
+
+        start = source.index("static BOOL ms_nscolor_claim")
+        end = source.index("\n}\n", start) + 3
+        claim = source[start:end]
+        self.assertIn("isClass ? (Class)self : object_getClass(self)", claim)
+        self.assertNotIn("Class cls = (Class)self;", claim)
+        self.assertIn("(IMP)ms_zero_return_imp", claim)
+
     def test_log_path_creates_documents_before_the_first_write(self):
         source = (Path(__file__).resolve().parents[1] / "shim" / "MacShim.m").read_text(
             encoding="utf-8"

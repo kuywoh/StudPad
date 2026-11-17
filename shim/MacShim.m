@@ -499,11 +499,14 @@ static id ms_nscolor_alternating_backgrounds(id self, SEL _cmd) {
 // AppKit API Studio needs rather than the process dying in QApplication's constructor.
 static BOOL ms_nscolor_claim(id self, SEL _cmd, SEL sel, BOOL isClass) {
     (void)_cmd;
-    Class cls = (Class)self;
+    // resolveInstanceMethod: passes an instance, not a class. Casting that instance to Class made
+    // class_addMethod read and write through its object memory as if it were a class, which can
+    // abort while Qt builds the palette.
+    Class cls = isClass ? (Class)self : object_getClass(self);
     studpad_log("[miss] %c[%s %s]", isClass ? '+' : '-', class_getName(cls), sel_getName(sel));
     Class target = isClass ? object_getClass(cls) : cls;
     if (class_getInstanceMethod(target, sel)) return NO;
-    return class_addMethod(target, sel, (IMP)ms_nil_imp, "@@:");
+    return class_addMethod(target, sel, (IMP)ms_zero_return_imp, "@@:");
 }
 
 static BOOL ms_nscolor_resolve_class(id self, SEL _cmd, SEL sel) {
